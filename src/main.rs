@@ -151,6 +151,14 @@ fn mouse() -> Vec2 {
     vec2(x, y)
 }
 
+/// Online shot clock, in seconds. Professional pool (Matchroom's World
+/// Nineball Tour) allows 30 seconds a shot, 60 for the shot after the break
+/// and one 30-second extension per player per rack; the same is used here,
+/// with the break itself also given 60.
+const SHOT_CLOCK: f32 = 30.0;
+const BREAK_CLOCK: f32 = 60.0;
+const EXTENSION: f32 = 30.0;
+
 fn power_to_speed(p: f32) -> f64 {
     0.35 + 8.65 * (p.clamp(0.0, 1.0) as f64).powf(1.6)
 }
@@ -261,9 +269,10 @@ fn state_hash(world: &World) -> u64 {
 
 enum Phase {
     Aim,
-    /// The button is held: the cue draws back by itself and the aim stays
-    /// locked where the player pointed. `held` is seconds since the press.
+    /// The button is held and the shot is being drawn back. `start` is where
+    /// the mouse was pressed, `held` the seconds since.
     Pull {
+        start: Vec2,
         held: f32,
     },
     DragCue,
@@ -312,6 +321,16 @@ struct Game {
     remote_cue: Option<(f64, f32)>,
     shooter_local: bool,
     cue_sent: f64,
+    /// Online shot clock: seconds left for the player at the table.
+    clock: f32,
+    /// Whether each player has used their one extension this rack.
+    extended: [bool; 2],
+    /// The last shot was a break, so the next one gets the longer clock.
+    after_break: bool,
+    /// Chat lines: mine?, text, time received.
+    chat: Vec<(bool, String, f64)>,
+    /// The chat line being typed, while the chat box is open.
+    typing: Option<String>,
     aim: f64,
     power: f32,
     gap: f64,
@@ -412,6 +431,11 @@ impl Game {
             remote_cue: None,
             shooter_local: true,
             cue_sent: 0.0,
+            clock: BREAK_CLOCK,
+            extended: [false; 2],
+            after_break: false,
+            chat: Vec::new(),
+            typing: None,
             aim: 0.0,
             power: 0.0,
             gap: 0.0,
@@ -502,6 +526,44 @@ impl Game {
         }
     }
 
+    /// The online shot clock ran out for the player at the table.
+    fn time_foul(&mut self, sfx: &Sfx) {
+        let was_break = self.rules.break_shot;
+        let out = self.rules.time_foul();
+        sfx.with(|s| s.foul());
+        self.rules.apply(&mut self.world, &out);
+        if was_break && out.winner.is_none() {
+            // Nobody has broken yet: the other player breaks instead.
+            self.rules.break_shot = true;
+            self.rules.kitchen = true;
+        }
+        self.power = 0.0;
+        self.gap = 0.0;
+        self.say(&out.message);
+        if out.winner.is_some() {
+            sfx.with(|s| s.chime());
+            self.phase = Phase::Over;
+        } else {
+            self.begin_turn();
+        }
+    }
+
+    /// Use this rack's one time extension, if it is still available.
+    fn extend_clock(&mut self) {
+        let me = self.rules.current;
+        if self.extended[me] {
+            return;
+        }
+        self.extended[me] = true;
+        self.clock += EXTENSION;
+        if self.ctl_of(me) == Ctl::Remote {
+            self.say("Opponent takes a time extension");
+        } else {
+            self.send(Msg::Extend);
+            self.say("Extension: 30 more seconds");
+        }
+    }
+
     /// Resolve re-racks and decisions, then hand the table to whoever shoots.
     fn begin_turn(&mut self) {
         if let Some(breaker) = self.rules.rerack.take() {
@@ -512,6 +574,7 @@ impl Game {
             );
             self.racks += 1;
             self.rules.reset_rack(breaker);
+            self.extended = [false; 2];
             self.rack_sound = true;
             self.say("New rack");
         }
@@ -523,6 +586,14 @@ impl Game {
                 self.phase = Phase::Decide;
             }
             return;
+        }
+        // The break, and the shot that follows it, get the longer clock.
+        let long = self.rules.break_shot || self.after_break;
+        self.after_break = false;
+        self.clock = if long { BREAK_CLOCK } else { SHOT_CLOCK };
+        // Testing aid: BPB_TEST_CLOCK shortens every clock to that many seconds.
+        if let Some(t) = std::env::var("BPB_TEST_CLOCK").ok().and_then(|t| t.parse::<f32>().ok()) {
+            self.clock = t.clamp(1.0, BREAK_CLOCK);
         }
         self.power = 0.0;
         self.gap = 0.0;
@@ -570,6 +641,7 @@ impl Game {
     }
 
     fn fire(&mut self, speed: f64, sfx: &Sfx) {
+        self.after_break = self.rules.break_shot;
         self.cue_follow_origin = self.world.cue().pos;
         self.shooter_local = self.ctl_of(self.rules.current) != Ctl::Remote;
         if self.shooter_local {
@@ -964,6 +1036,25 @@ impl Game {
                 Msg::Start { seed, first, .. } => {
                     self.restart = Some((seed, (first as usize).min(1)))
                 }
+                Msg::Chat(text) => {
+                    self.chat.push((false, text, get_time()));
+                    if self.chat.len() > 50 {
+                        self.chat.remove(0);
+                    }
+                    sfx.click();
+                }
+                Msg::Timeout => {
+                    if !ready {
+                        self.inbox.push_front(Msg::Timeout);
+                        break;
+                    }
+                    self.time_foul(sfx);
+                }
+                Msg::Extend => {
+                    if ready {
+                        self.extend_clock();
+                    }
+                }
                 Msg::Bye => {}
             }
         }
@@ -976,6 +1067,68 @@ impl Game {
 
     fn update(&mut self, dt: f32, lay: &Layout, sfx: &Sfx, frozen_input: bool) {
         self.network(sfx);
+        // Chat: Enter opens the box, Enter sends, Esc closes. While it is
+        // open the keyboard belongs to the chat, not the game.
+        if self.net.is_none() {
+            self.typing = None;
+        } else if let Some(mut text) = self.typing.take() {
+            while let Some(c) = get_char_pressed() {
+                if !c.is_control() && text.chars().count() < net::CHAT_MAX {
+                    text.push(c);
+                }
+            }
+            if is_key_pressed(KeyCode::Backspace) {
+                text.pop();
+            }
+            if is_key_pressed(KeyCode::Enter) || is_key_pressed(KeyCode::KpEnter) {
+                let text = net::clean_chat(&text);
+                if !text.is_empty() {
+                    self.send(Msg::Chat(text.clone()));
+                    self.chat.push((true, text, get_time()));
+                }
+            } else if !is_key_pressed(KeyCode::Escape) {
+                self.typing = Some(text);
+            }
+        } else if !frozen_input
+            && !matches!(self.phase, Phase::Over)
+            && (is_key_pressed(KeyCode::Enter) || is_key_pressed(KeyCode::KpEnter))
+        {
+            while get_char_pressed().is_some() {}
+            self.typing = Some(String::new());
+        }
+        // Testing aid: BPB_TEST_CHAT sends one chat line as the match starts.
+        if self.net.is_some() && self.chat.is_empty() && self.shots == 0 && self.clock < BREAK_CLOCK - 2.0 {
+            if let Ok(text) = std::env::var("BPB_TEST_CHAT") {
+                let text = net::clean_chat(&text);
+                if !text.is_empty() {
+                    self.send(Msg::Chat(text.clone()));
+                    self.chat.push((true, text, get_time()));
+                }
+            }
+        }
+        // Online shot clock. Each game keeps time for its own player and
+        // tells the other when it runs out; the other side only displays it.
+        if self.net.is_some() {
+            let mine = matches!(self.phase, Phase::Aim | Phase::Pull { .. } | Phase::DragCue);
+            if mine || matches!(self.phase, Phase::RemoteAim) {
+                let before = self.clock;
+                self.clock = (self.clock - dt).max(0.0);
+                if mine {
+                    if self.clock <= 5.0 && self.clock > 0.0 && before.ceil() != self.clock.ceil() {
+                        sfx.click();
+                    }
+                    if is_key_pressed(KeyCode::E) && self.typing.is_none() && !frozen_input {
+                        self.extend_clock();
+                    }
+                    if self.clock <= 0.0 {
+                        self.send(Msg::Timeout);
+                        self.time_foul(sfx);
+                    }
+                }
+            }
+        }
+        // While the chat box is open the game ignores its own hotkeys.
+        let frozen_input = frozen_input || self.typing.is_some();
         let m = mouse();
         let delta = m - self.last_mouse;
         let moved = delta.length() > 0.5;
@@ -1111,23 +1264,36 @@ impl Game {
                             };
                         } else if m.y > lay.top {
                             self.power = 0.0;
-                            self.phase = Phase::Pull { held: 0.0 };
+                            self.phase = Phase::Pull { start: m, held: 0.0 };
                         }
                     }
                 }
                 self.update_call();
             }
-            Phase::Pull { held } => {
-                // Holding the button draws the cue back; the mouse is free to
-                // rest on the aim point. Power climbs to full in CHARGE
-                // seconds, then eases back down and up again, so an
-                // overshoot can be waited out. It starts slowly for touch.
-                const CHARGE: f32 = 1.5;
+            Phase::Pull { start, held } => {
                 let held = held + dt;
-                self.phase = Phase::Pull { held };
-                let x = (held / CHARGE) % 2.0;
-                let x = if x > 1.0 { 2.0 - x } else { x };
-                self.power = x.powf(1.4).clamp(0.0, 1.0);
+                self.phase = Phase::Pull { start, held };
+                // With the aim guide off the player judges the shot by where
+                // the cursor rests, so it must not have to move: holding the
+                // button draws the cue back by itself. Power climbs to full
+                // in CHARGE seconds, then eases down and up again so an
+                // overshoot can be waited out. With a guide showing, the
+                // shot is drawn by dragging the mouse back along the cue.
+                let ok;
+                if self.guide == 2 {
+                    const CHARGE: f32 = 1.5;
+                    let x = (held / CHARGE) % 2.0;
+                    let x = if x > 1.0 { 2.0 - x } else { x };
+                    self.power = x.powf(1.4).clamp(0.0, 1.0);
+                    // A quick click is not a shot.
+                    ok = held > 0.14 && self.power > 0.004;
+                } else {
+                    let ahead = self.cam.to_screen(cue + V2::from_angle(self.aim) * 0.2);
+                    let dir = (ahead - cs).normalize_or_zero();
+                    let pull = (m - start).dot(-dir);
+                    self.power = (pull / (190.0 * lay.ui)).clamp(0.0, 1.0);
+                    ok = self.power > 0.03;
+                }
                 self.gap = self.power as f64 * 0.30;
                 if is_mouse_button_pressed(MouseButton::Right)
                     || is_key_pressed(KeyCode::Escape)
@@ -1137,8 +1303,7 @@ impl Game {
                     self.gap = 0.0;
                     self.phase = Phase::Aim;
                 } else if !is_mouse_button_down(MouseButton::Left) {
-                    // A quick click is not a shot.
-                    if held > 0.14 && self.power > 0.004 {
+                    if ok {
                         self.phase = Phase::Stroke {
                             t: 0.0,
                             from: self.gap,
@@ -1336,6 +1501,88 @@ impl Game {
             self.remote_cue = None;
         }
         self.update_camera(dt, lay);
+    }
+
+    /// Recent chat lines and the chat box, bottom left.
+    fn draw_chat(&self, r: &Renderer, lay: &Layout) {
+        if self.net.is_none() && self.chat.is_empty() {
+            return;
+        }
+        let ui = lay.ui;
+        let now = get_time();
+        let size = 14.0 * ui;
+        let row = 24.0 * ui;
+        let x = 16.0 * ui;
+        let mut y = lay.sh - 64.0 * ui;
+        if let Some(text) = &self.typing {
+            let rect = Rect::new(x - 6.0 * ui, y - 14.0 * ui, 460.0 * ui, 28.0 * ui);
+            r.panel(rect, 8.0 * ui, Color::new(0.0, 0.0, 0.0, 0.78), GOLD, 1.4);
+            let cursor = if (now * 2.0) as i64 % 2 == 0 { "|" } else { "" };
+            r.text(&format!("{text}{cursor}"), x + 4.0 * ui, y, size, INK, false);
+            let left = net::CHAT_MAX - text.chars().count();
+            r.text(
+                &format!("Enter: send   Esc: close   {left} left"),
+                rect.x + rect.w + 10.0 * ui,
+                y,
+                12.0 * ui,
+                Color::new(1.0, 1.0, 1.0, 0.5),
+                false,
+            );
+            y -= row + 8.0 * ui;
+        }
+        // Lines fade out after a while; opening the box brings them back.
+        let open = self.typing.is_some();
+        for (mine, text, at) in self.chat.iter().rev().take(if open { 8 } else { 5 }) {
+            let age = (now - at) as f32;
+            let alpha = if open { 1.0 } else { (12.0 - age).clamp(0.0, 1.0) };
+            if alpha <= 0.0 {
+                continue;
+            }
+            let who = if *mine { "You" } else { self.rules.names[1 - self.local].as_str() };
+            let label = format!("{who}:  ");
+            let lw = r.text_width(&label, size, true);
+            let tw = r.text_width(text, size, false);
+            let rect = Rect::new(x - 6.0 * ui, y - 11.0 * ui, lw + tw + 18.0 * ui, 22.0 * ui);
+            r.panel(rect, 8.0 * ui, Color::new(0.0, 0.0, 0.0, 0.62 * alpha), Color::new(1.0, 1.0, 1.0, 0.10 * alpha), 1.0);
+            let name_color = if *mine { GOLD } else { Color::new(0.55, 0.80, 1.0, 1.0) };
+            r.text(&label, x, y, size, Color::new(name_color.r, name_color.g, name_color.b, alpha), true);
+            r.text(text, x + lw, y, size, Color::new(INK.r, INK.g, INK.b, alpha), false);
+            y -= row;
+        }
+    }
+
+    /// The online shot clock, under the status line.
+    fn draw_clock(&self, r: &Renderer, lay: &Layout) {
+        let mine = matches!(self.phase, Phase::Aim | Phase::Pull { .. } | Phase::DragCue);
+        if self.net.is_none() || !(mine || matches!(self.phase, Phase::RemoteAim)) {
+            return;
+        }
+        let ui = lay.ui;
+        let mid = lay.sw / 2.0;
+        let y = if self.rules.mode == Mode::NineBall { 92.0 } else { 70.0 } * ui;
+        let secs = self.clock.ceil() as i32;
+        let low = self.clock <= 10.0;
+        let color = if low {
+            let pulse = 0.75 + 0.25 * (get_time() * 6.0).sin() as f32;
+            Color::new(1.0, 0.32, 0.26, pulse)
+        } else if mine {
+            INK
+        } else {
+            DIM
+        };
+        let w = 150.0 * ui;
+        let full = if self.clock > SHOT_CLOCK { BREAK_CLOCK } else { SHOT_CLOCK };
+        let bar = Rect::new(mid - w / 2.0, y + 11.0 * ui, w, 4.0 * ui);
+        r.panel(bar, 2.0 * ui, Color::new(1.0, 1.0, 1.0, 0.12), Color::new(0.0, 0.0, 0.0, 0.0), 0.0);
+        let k = (self.clock / full).clamp(0.0, 1.0);
+        if k > 0.0 {
+            let fill = Rect::new(bar.x, bar.y, (bar.w * k).max(bar.h), bar.h);
+            r.panel(fill, 2.0 * ui, if low { color } else { GOLD }, Color::new(0.0, 0.0, 0.0, 0.0), 0.0);
+        }
+        r.text_center(&format!("{}:{:02}", secs / 60, secs % 60), mid, y, 17.0 * ui, color, true);
+        if mine && !self.extended[self.rules.current] {
+            r.text("E: +30 s", mid + w / 2.0 + 10.0 * ui, y + 13.0 * ui, 11.5 * ui, Color::new(1.0, 1.0, 1.0, 0.5), false);
+        }
     }
 
     fn showing_cue(&self) -> bool {
@@ -1757,13 +2004,17 @@ impl Game {
         // Bottom bar: hints, power, spin.
         let by = lay.sh - 25.0 * ui;
         if human_aiming {
-            let hint = if self.view == ViewMode::Top {
-                "Point to aim  |  hold: draw back, release: shoot  |  right-click: cancel  |  A/D: fine aim  |  V: view  |  G: guides  |  H: pockets  |  Esc: menu"
+            let shoot = if self.guide == 2 { "hold: draw back, release: shoot" } else { "pull back: shoot" };
+            let mut hint = if self.view == ViewMode::Top {
+                format!("Point to aim  |  {shoot}  |  A/D: fine aim  |  V: view  |  G: guides  |  H: pockets  |  Esc: menu")
             } else {
-                "Move mouse: aim  |  hold: draw back, release: shoot  |  right-drag: orbit  |  wheel: zoom  |  Space: cue center  |  V: view  |  G: guides  |  H: pockets  |  Esc: menu"
+                format!("Move mouse: aim  |  {shoot}  |  right-drag: orbit  |  wheel: zoom  |  Space: cue center  |  V: view  |  G: guides  |  H: pockets  |  Esc: menu")
             };
+            if self.net.is_some() {
+                hint.push_str("  |  Enter: chat");
+            }
             r.text(
-                hint,
+                &hint,
                 16.0 * ui,
                 by + 6.0 * ui,
                 13.0 * ui,
@@ -1771,6 +2022,11 @@ impl Game {
                 false,
             );
         }
+        if self.net.is_some() && !human_aiming && self.typing.is_none() {
+            r.text("Enter: chat", 16.0 * ui, by + 6.0 * ui, 13.0 * ui, Color::new(1.0, 1.0, 1.0, 0.50), false);
+        }
+        self.draw_chat(r, lay);
+        self.draw_clock(r, lay);
         if self.power > 0.0 && self.showing_cue() {
             let w = 300.0 * ui;
             let rect = Rect::new(mid - w / 2.0, by - 22.0 * ui, w, 14.0 * ui);
@@ -2062,6 +2318,11 @@ fn fresh_seed() -> u64 {
 #[macroquad::main(conf)]
 async fn main() {
     let capture = arg_value("--shot");
+    // Capture on the clock instead of a frame count (--seconds N): the game
+    // then runs in real time and stays open a few seconds after the shot,
+    // so two online windows can each capture while both are still there.
+    let capture_secs: Option<f64> = arg_value("--seconds").and_then(|s| s.parse().ok());
+    let mut captured = false;
     let capture_at: u32 = arg_value("--frames")
         .and_then(|f| f.parse().ok())
         .unwrap_or(0);
@@ -2189,7 +2450,7 @@ async fn main() {
             next_frame().await;
             continue;
         }
-        let dt = if capture.is_some() && !settings.autoplay {
+        let dt = if capture.is_some() && !settings.autoplay && capture_secs.is_none() {
             1.0 / 60.0
         } else {
             get_frame_time()
@@ -2272,7 +2533,7 @@ async fn main() {
         if let Some(g) = game.as_mut() {
             let over = matches!(g.phase, Phase::Over);
             let online = g.opponent == Opponent::Online;
-            if is_key_pressed(KeyCode::Escape) && !over && !matches!(g.phase, Phase::Pull { .. }) {
+            if is_key_pressed(KeyCode::Escape) && !over && !matches!(g.phase, Phase::Pull { .. }) && g.typing.is_none() {
                 g.paused = !g.paused;
             }
             if !g.paused || online {
@@ -2369,13 +2630,21 @@ async fn main() {
             } else {
                 90
             };
-            if frame == at {
+            let due = match capture_secs {
+                Some(secs) => {
+                    quit |= get_time() >= secs + 6.0;
+                    !captured && get_time() >= secs
+                }
+                None => frame == at,
+            };
+            if due {
+                captured = true;
                 let mut img = get_screen_data();
                 for px in img.bytes.chunks_mut(4) {
                     px[3] = 255;
                 }
                 img.export_png(path);
-                quit = true;
+                quit |= capture_secs.is_none();
             }
         }
         if !scripted {

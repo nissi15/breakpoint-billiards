@@ -1,6 +1,6 @@
 [package]
 name = "breakpoint-billiards"
-version = "1.1.0"
+version = "1.2.0"
 edition = "2024"
 description = "A realistic 3D pool game: 960 Hz physics, official WPA 8-ball and 9-ball rules, an elite computer opponent and online rooms you join with a 6-letter code."
 license = "MIT"

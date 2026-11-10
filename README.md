@@ -123,6 +123,8 @@ cd breakpoint-billiards
 - **Same Wi-Fi?** The game finds the room on your network and connects straight away.
 - **Anywhere else?** You meet through a free public relay, then the two games try to connect directly to each other. When that works the HUD shows `ONLINE (DIRECT)` and the delay drops to almost nothing; if a router blocks it, play continues through the relay.
 - **Private.** Everything sent over the internet is encrypted with a key made from your room code, so only the two of you can read it or take part.
+- **Chat.** Press **Enter** to send your opponent a message. Chat is encrypted like everything else.
+- **Shot clock.** You have 30 seconds a shot, as on the professional tour, with 60 for the break and the shot after it. Each player can press **E** once a rack for 30 more. Running out is a foul: your opponent gets ball in hand.
 - **Reliable.** Every shot is confirmed by the other player and re-sent if it gets lost, and after each shot the final ball positions are shared, so the two tables can never drift apart.
 
 ## Controls
@@ -130,7 +132,7 @@ cd breakpoint-billiards
 | Action | Mouse / key |
 |---|---|
 | Aim | Move the mouse |
-| Shoot | Point at your target, hold the **left button** while the cue draws back, release to shoot (right-click cancels) |
+| Shoot | Hold the **left button**, pull back for power, release. With the aim guide off: hold the button while the cue draws back by itself, then release (right-click cancels) |
 | Fine aim | **A / D** or arrow keys (hold **Shift** for finer) |
 | Spin (english) | Drag the dot on the cue-ball widget, bottom right; **C** resets |
 | Look around | **Right-drag** to orbit, **wheel** to zoom, **middle-drag** to move |
@@ -139,6 +141,8 @@ cd breakpoint-billiards
 | Call a shot (8-Ball) | Click a pocket, right-click a ball; **S** calls safety |
 | Push out (9-Ball) | **P** on the shot after the break |
 | Place the cue ball | Drag it when you have ball in hand |
+| Chat (online) | **Enter** to type, **Enter** to send, **Esc** to close |
+| Time extension (online) | **E** adds 30 seconds, once per rack |
 | Pause / fullscreen | **Esc** / **F11** |
 
 <details>

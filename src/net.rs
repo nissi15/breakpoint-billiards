@@ -53,7 +53,21 @@ pub enum Msg {
     /// the shooter's record of what happened, which both sides judge from.
     State(Vec<(u8, bool, f64, f64)>, ShotLog),
     Choice(u8),
+    /// A chat line typed by the other player.
+    Chat(String),
+    /// The shooter ran out of time: a foul, called by the shooter's own game.
+    Timeout,
+    /// The shooter used their one time extension for this rack.
+    Extend,
     Bye,
+}
+
+/// Longest chat line, in characters.
+pub const CHAT_MAX: usize = 80;
+
+/// Chat text as it may be shown: one line, no control characters, capped.
+pub fn clean_chat(text: &str) -> String {
+    text.chars().filter(|c| !c.is_control()).take(CHAT_MAX).collect::<String>().trim().to_string()
 }
 
 fn f(v: f64) -> String {
@@ -131,6 +145,13 @@ impl Msg {
                 s
             }
             Msg::Choice(c) => format!("CHOICE {c}"),
+            // Hex keeps spaces and any language intact on a line-based wire.
+            Msg::Chat(text) => {
+                let hex: String = clean_chat(text).bytes().map(|b| format!("{b:02x}")).collect();
+                format!("CHAT {hex}")
+            }
+            Msg::Timeout => "TIMEOUT".into(),
+            Msg::Extend => "EXTEND".into(),
             Msg::Bye => "BYE".into(),
         }
     }
@@ -215,6 +236,20 @@ impl Msg {
                 Some(Msg::State(balls, log))
             }
             "CHOICE" => Some(Msg::Choice(it.next()?.parse().ok()?)),
+            "CHAT" => {
+                let hex = it.next()?;
+                if hex.len() % 2 != 0 || hex.len() > CHAT_MAX * 8 {
+                    return None;
+                }
+                let bytes: Option<Vec<u8>> = (0..hex.len())
+                    .step_by(2)
+                    .map(|i| hex.get(i..i + 2).and_then(|h| u8::from_str_radix(h, 16).ok()))
+                    .collect();
+                let text = clean_chat(&String::from_utf8(bytes?).ok()?);
+                (!text.is_empty()).then_some(Msg::Chat(text))
+            }
+            "TIMEOUT" => Some(Msg::Timeout),
+            "EXTEND" => Some(Msg::Extend),
             "BYE" => Some(Msg::Bye),
             _ => None,
         }
@@ -1369,6 +1404,9 @@ mod tests {
                 },
             ),
             Msg::Choice(3),
+            Msg::Chat("Nice shot!  Uri tayari? :)".into()),
+            Msg::Timeout,
+            Msg::Extend,
         ]
     }
 
@@ -1524,6 +1562,18 @@ mod tests {
         let (host, guest) = pair(Paths { lan: true, relay: false, direct: false });
         assert!(!host.relayed() && !guest.relayed());
         exchange(host, guest);
+    }
+
+    #[test]
+    fn chat_is_cleaned_and_bad_chat_is_dropped() {
+        let long = "x".repeat(500);
+        let Some(Msg::Chat(got)) = Msg::decode(&Msg::Chat(long).encode()) else { panic!("no chat") };
+        assert_eq!(got.chars().count(), CHAT_MAX);
+        let Some(Msg::Chat(got)) = Msg::decode(&Msg::Chat("  hi\nthere\t ".into()).encode()) else { panic!("no chat") };
+        assert_eq!(got, "hithere");
+        for bad in ["CHAT", "CHAT zz", "CHAT abc", "CHAT ff", "CHAT 0a"] {
+            assert_eq!(Msg::decode(bad), None, "{bad}");
+        }
     }
 
     #[test]

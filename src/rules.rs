@@ -534,6 +534,27 @@ impl Rules {
         self.kitchen_relief(world);
     }
 
+    /// The shooter's time ran out (online shot clock): a standard foul, so
+    /// the other player gets ball in hand, and in 9-ball it counts toward
+    /// three consecutive fouls.
+    pub fn time_foul(&self) -> Outcome {
+        let me = self.current;
+        let opp = 1 - me;
+        let mut out = Outcome {
+            foul: Some("Out of time"),
+            next_player: opp,
+            ball_in_hand: true,
+            ..Outcome::default()
+        };
+        if self.mode == Mode::NineBall && self.fouls[me] >= 2 {
+            out.winner = Some(opp);
+            out.message = format!("Three consecutive fouls - {} wins", self.names[opp]);
+        } else {
+            out.message = format!("Out of time - ball in hand for {}", self.names[opp]);
+        }
+        out
+    }
+
     /// Resolve the pending decision.
     pub fn choose(&mut self, world: &mut World, choice: Choice) {
         let Some(d) = self.pending.take() else { return };
