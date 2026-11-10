@@ -106,6 +106,8 @@ cd breakpoint-billiards
 
 </details>
 
+**Updates.** When a new version is out, the menu shows an *Update available* notice. Click **UPDATE** and the game downloads it, swaps itself and restarts. (Versions before 1.2.0 don't have this; run the install line once more to get it.)
+
 ## Play a friend online
 
 ```

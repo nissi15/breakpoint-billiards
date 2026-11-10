@@ -9,6 +9,7 @@ mod prefs;
 mod physics;
 mod render;
 mod rules;
+mod update;
 
 use ai::{AiShot, Difficulty};
 use audio::Sounds;
@@ -2366,6 +2367,7 @@ async fn main() {
             set_fullscreen(false);
         }
     }
+    let mut updater = update::Updater::new(!scripted || std::env::var_os("BPB_UPDATE_TEST").is_some());
     let mut last_saved = prefs_from(&settings, r.theme, &sfx);
     // BPB_TEST_SOUND keeps sound on during self-play so it can be recorded.
     if (capture.is_some() || settings.autoplay) && std::env::var_os("BPB_TEST_SOUND").is_none() {
@@ -2593,6 +2595,44 @@ async fn main() {
                     game = Some(Game::new(&settings, breaker, fresh_seed(), None, 0));
                 }
                 MenuAction::Quit => quit = true,
+            }
+            // Update notice, top left of the menu.
+            updater.poll();
+            // Testing aid: BPB_UPDATE_AUTO accepts the update without a click.
+            if matches!(updater.state, update::State::Available(_)) && std::env::var_os("BPB_UPDATE_AUTO").is_some() {
+                updater.start();
+            }
+            let ui = lay.ui;
+            let card = Rect::new(22.0 * ui, 18.0 * ui, 400.0 * ui, 58.0 * ui);
+            let notice = |r: &Renderer, title: &str, sub: &str| {
+                r.panel(card, 12.0 * ui, Color::new(0.05, 0.06, 0.08, 0.94), GOLD, 1.4);
+                r.text(title, card.x + 16.0 * ui, card.y + 21.0 * ui, 15.0 * ui, INK, true);
+                r.text(sub, card.x + 16.0 * ui, card.y + 41.0 * ui, 12.0 * ui, DIM, false);
+            };
+            let side = Rect::new(card.x + card.w - 118.0 * ui, card.y + 12.0 * ui, 104.0 * ui, 34.0 * ui);
+            match &updater.state {
+                update::State::Available(v) => {
+                    notice(&r, &format!("Update available: version {v}"), &format!("You have {}", update::current()));
+                    if button(&r, &sfx, side, "UPDATE", 13.0 * ui, PRIMARY) {
+                        updater.start();
+                    }
+                }
+                update::State::Downloading(v, _) => {
+                    notice(&r, &format!("Downloading version {v}..."), "The game restarts when it is ready");
+                }
+                update::State::Failed(why) => {
+                    let why = why.clone();
+                    notice(&r, "Update failed", &why);
+                    if button(&r, &sfx, side, "CLOSE", 13.0 * ui, PLAIN) {
+                        updater.state = update::State::Idle;
+                    }
+                }
+                update::State::Ready => {
+                    if updater.restart() {
+                        quit = true;
+                    }
+                }
+                _ => {}
             }
         }
         if let Some(g) = next {
