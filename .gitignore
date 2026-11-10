@@ -1,0 +1,5 @@
+/target
+/dist
+# Scratch captures from local testing; the README's images live in docs/.
+/*.png
+/*.log

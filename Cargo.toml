@@ -1,0 +1,26 @@
+[package]
+name = "breakpoint-billiards"
+version = "1.0.0"
+edition = "2024"
+description = "A realistic 3D pool game: 960 Hz physics, official WPA 8-ball and 9-ball rules, an elite computer opponent and online rooms you join with a 6-letter code."
+license = "MIT"
+repository = "https://github.com/nissi15/breakpoint-billiards"
+readme = "README.md"
+keywords = ["game", "billiards", "pool", "8-ball", "physics"]
+categories = ["games"]
+build = "build.rs"
+
+[dependencies]
+macroquad = "0.4"
+
+[build-dependencies]
+winresource = "0.1"
+
+[profile.dev]
+opt-level = 2
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 4
+strip = true
