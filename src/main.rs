@@ -261,8 +261,10 @@ fn state_hash(world: &World) -> u64 {
 
 enum Phase {
     Aim,
+    /// The button is held: the cue draws back by itself and the aim stays
+    /// locked where the player pointed. `held` is seconds since the press.
     Pull {
-        start: Vec2,
+        held: f32,
     },
     DragCue,
     Stroke {
@@ -1109,17 +1111,23 @@ impl Game {
                             };
                         } else if m.y > lay.top {
                             self.power = 0.0;
-                            self.phase = Phase::Pull { start: m };
+                            self.phase = Phase::Pull { held: 0.0 };
                         }
                     }
                 }
                 self.update_call();
             }
-            Phase::Pull { start } => {
-                let ahead = self.cam.to_screen(cue + V2::from_angle(self.aim) * 0.2);
-                let dir = (ahead - cs).normalize_or_zero();
-                let pull = (m - start).dot(-dir);
-                self.power = (pull / (190.0 * lay.ui)).clamp(0.0, 1.0);
+            Phase::Pull { held } => {
+                // Holding the button draws the cue back; the mouse is free to
+                // rest on the aim point. Power climbs to full in CHARGE
+                // seconds, then eases back down and up again, so an
+                // overshoot can be waited out. It starts slowly for touch.
+                const CHARGE: f32 = 1.5;
+                let held = held + dt;
+                self.phase = Phase::Pull { held };
+                let x = (held / CHARGE) % 2.0;
+                let x = if x > 1.0 { 2.0 - x } else { x };
+                self.power = x.powf(1.4).clamp(0.0, 1.0);
                 self.gap = self.power as f64 * 0.30;
                 if is_mouse_button_pressed(MouseButton::Right)
                     || is_key_pressed(KeyCode::Escape)
@@ -1129,7 +1137,8 @@ impl Game {
                     self.gap = 0.0;
                     self.phase = Phase::Aim;
                 } else if !is_mouse_button_down(MouseButton::Left) {
-                    if self.power > 0.03 {
+                    // A quick click is not a shot.
+                    if held > 0.14 && self.power > 0.004 {
                         self.phase = Phase::Stroke {
                             t: 0.0,
                             from: self.gap,
@@ -1749,9 +1758,9 @@ impl Game {
         let by = lay.sh - 25.0 * ui;
         if human_aiming {
             let hint = if self.view == ViewMode::Top {
-                "Point to aim  |  pull back: shoot  |  A/D: fine aim  |  V: view  |  G: guides  |  H: pockets  |  Esc: menu"
+                "Point to aim  |  hold: draw back, release: shoot  |  right-click: cancel  |  A/D: fine aim  |  V: view  |  G: guides  |  H: pockets  |  Esc: menu"
             } else {
-                "Move mouse: aim  |  pull back: shoot  |  right-drag: orbit  |  wheel: zoom  |  Space: cue center  |  V: view  |  G: guides  |  H: pockets  |  Esc: menu"
+                "Move mouse: aim  |  hold: draw back, release: shoot  |  right-drag: orbit  |  wheel: zoom  |  Space: cue center  |  V: view  |  G: guides  |  H: pockets  |  Esc: menu"
             };
             r.text(
                 hint,

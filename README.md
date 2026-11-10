@@ -130,7 +130,7 @@ cd breakpoint-billiards
 | Action | Mouse / key |
 |---|---|
 | Aim | Move the mouse |
-| Shoot | Hold **left button**, pull back for power, release |
+| Shoot | Point at your target, hold the **left button** while the cue draws back, release to shoot (right-click cancels) |
 | Fine aim | **A / D** or arrow keys (hold **Shift** for finer) |
 | Spin (english) | Drag the dot on the cue-ball widget, bottom right; **C** resets |
 | Look around | **Right-drag** to orbit, **wheel** to zoom, **middle-drag** to move |
