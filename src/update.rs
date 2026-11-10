@@ -180,7 +180,11 @@ impl Updater {
     pub fn restart(&mut self) -> bool {
         let started = std::env::current_exe()
             .ok()
-            .and_then(|exe| Command::new(exe).spawn().ok())
+            .and_then(|exe| {
+                // The testing overrides must not carry over, or the new copy
+                // would think it is old and update again.
+                Command::new(exe).env_remove("BPB_FAKE_VERSION").env_remove("BPB_UPDATE_AUTO").spawn().ok()
+            })
             .is_some();
         if !started {
             self.state = State::Failed("Updated - please start the game again".into());
