@@ -2,8 +2,10 @@
 //!
 //! On the same network the guest finds the host by broadcasting the code and
 //! connects directly over TCP. Otherwise both sides meet on a free public
-//! MQTT relay, using topics derived from the code; no IP addresses, port
-//! forwarding or accounts are needed.
+//! MQTT relay; no IP addresses, port forwarding or accounts are needed.
+//! Everything sent through the relay is encrypted with a key derived from
+//! the room code, and the two games then try to open a direct path between
+//! themselves so play does not have to keep going through the relay.
 //!
 //! Only shots and decisions travel over the wire. Both sides run the same
 //! deterministic physics, and after every shot the shooter also sends the
@@ -13,7 +15,10 @@
 use crate::physics::ShotLog;
 use crate::rules::ShotCall;
 use std::io::{ErrorKind, Read, Write};
-use std::net::{TcpListener, TcpStream, ToSocketAddrs, UdpSocket};
+use chacha20poly1305::aead::rand_core::RngCore;
+use chacha20poly1305::aead::{Aead, AeadCore, KeyInit, OsRng};
+use chacha20poly1305::ChaCha20Poly1305;
+use std::net::{SocketAddr, TcpListener, TcpStream, ToSocketAddrs, UdpSocket};
 use std::sync::mpsc::{Receiver, channel};
 use std::time::{Duration, Instant};
 
@@ -247,30 +252,16 @@ fn relay_for(code: &str) -> usize {
 }
 
 fn random_u64() -> u64 {
-    let t = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos() as u64)
-        .unwrap_or(7);
-    // Mix in the address of a stack value so two instances started in the
-    // same nanosecond still differ.
-    let local = 0u8;
-    let addr = &local as *const u8 as u64;
-    let mut x = t ^ addr.rotate_left(32) ^ 0x9E3779B97F4A7C15;
-    x ^= x >> 33;
-    x = x.wrapping_mul(0xff51afd7ed558ccd);
-    x ^= x >> 33;
-    x = x.wrapping_mul(0xc4ceb9fe1a85ec53);
-    x ^ (x >> 33)
+    OsRng.next_u64()
 }
 
+/// A fresh room code from the operating system's secure random source: the
+/// code is the only secret protecting a match.
 fn random_code(relay: usize) -> String {
-    let mut seed = random_u64();
     loop {
-        let mut code = String::new();
-        for _ in 0..CODE_LEN {
-            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
-            code.push(CODE_ALPHABET[(seed >> 59) as usize % CODE_ALPHABET.len()] as char);
-        }
+        let code: String = (0..CODE_LEN)
+            .map(|_| CODE_ALPHABET[OsRng.next_u32() as usize % CODE_ALPHABET.len()] as char)
+            .collect();
         if relay_for(&code) == relay {
             return code;
         }
@@ -293,8 +284,61 @@ pub fn normalize_code(input: &str) -> Option<String> {
     valid.then_some(code)
 }
 
-fn topic(code: &str, to: &str) -> String {
-    format!("{TOPIC_ROOT}/{code}/{to}")
+/// What both players derive from the room code: where to meet on the relay
+/// and the key that encrypts everything they say there. The derivation is
+/// deliberately slow, so someone watching the relay cannot simply try every
+/// possible code.
+#[derive(Clone)]
+struct Keys {
+    meeting: String,
+    key: [u8; 32],
+}
+
+const KEY_ROUNDS: u32 = 150_000;
+
+impl Keys {
+    fn derive(code: &str) -> Keys {
+        let mut out = [0u8; 48];
+        pbkdf2::pbkdf2_hmac::<sha2::Sha256>(code.as_bytes(), b"breakpoint-billiards/room/v2", KEY_ROUNDS, &mut out);
+        let mut key = [0u8; 32];
+        key.copy_from_slice(&out[16..]);
+        Keys { meeting: hex(&out[..16]), key }
+    }
+}
+
+fn topic(keys: &Keys, to: &str) -> String {
+    format!("{TOPIC_ROOT}/{}/{to}", keys.meeting)
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+fn unhex(s: &str) -> Option<Vec<u8>> {
+    if s.len() % 2 != 0 || !s.is_ascii() {
+        return None;
+    }
+    (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).ok()).collect()
+}
+
+/// Encrypt and authenticate a message (ChaCha20-Poly1305, random nonce).
+fn seal(key: &[u8; 32], plain: &str) -> String {
+    let cipher = ChaCha20Poly1305::new(key.into());
+    let nonce = ChaCha20Poly1305::generate_nonce(&mut OsRng);
+    let mut out = nonce.to_vec();
+    out.extend(cipher.encrypt(&nonce, plain.as_bytes()).unwrap_or_default());
+    hex(&out)
+}
+
+/// Decrypt a message; None if it was not made with this room's key.
+fn open(key: &[u8; 32], sealed: &str) -> Option<String> {
+    let data = unhex(sealed.trim())?;
+    if data.len() < 12 + 16 {
+        return None;
+    }
+    let cipher = ChaCha20Poly1305::new(key.into());
+    let plain = cipher.decrypt(data[..12].into(), &data[12..]).ok()?;
+    String::from_utf8(plain).ok()
 }
 
 // ---------------------------------------------------------------------------
@@ -378,6 +422,7 @@ struct Mqtt {
     /// Messages read during a handshake but meant for whoever uses the
     /// connection next.
     backlog: Vec<String>,
+    key: [u8; 32],
     last_tx: Instant,
     alive: bool,
 }
@@ -385,7 +430,7 @@ struct Mqtt {
 impl Mqtt {
     /// Connect, set a last-will message, subscribe and switch to
     /// non-blocking mode. Blocks for at most a few seconds.
-    fn connect(relay: usize, will: (&str, &str), subscribe: &str) -> Result<Mqtt, String> {
+    fn connect(relay: usize, key: &[u8; 32], will: (&str, &str), subscribe: &str) -> Result<Mqtt, String> {
         let (host, port) = RELAYS[relay];
         let addr = (host, port)
             .to_socket_addrs()
@@ -403,7 +448,7 @@ impl Mqtt {
         body.extend_from_slice(&60u16.to_be_bytes()); // keep-alive seconds
         put_str(&mut body, format!("bpb-{}", random_id()).as_bytes());
         put_str(&mut body, will.0.as_bytes());
-        put_str(&mut body, will.1.as_bytes());
+        put_str(&mut body, seal(key, will.1).as_bytes());
         stream.write_all(&packet(0x10, &body)).map_err(|e| e.to_string())?;
         let mut ack = [0u8; 4];
         stream
@@ -420,6 +465,7 @@ impl Mqtt {
             stream,
             buf: Vec::new(),
             backlog: Vec::new(),
+            key: *key,
             last_tx: Instant::now(),
             alive: true,
         };
@@ -451,7 +497,7 @@ impl Mqtt {
         }
         let mut body = Vec::new();
         put_str(&mut body, topic.as_bytes());
-        body.extend_from_slice(payload.as_bytes());
+        body.extend_from_slice(seal(&self.key, payload).as_bytes());
         self.alive = write_fully(&mut self.stream, &packet(0x30, &body));
         self.last_tx = Instant::now();
     }
@@ -491,8 +537,9 @@ impl Mqtt {
                 start += 2; // packet id, only present above QoS 0
             }
             if let Some(p) = body.get(start..) {
-                if let Ok(s) = std::str::from_utf8(p) {
-                    out.push(s.to_string());
+                // Anything not sealed with this room's key is ignored.
+                if let Some(plain) = std::str::from_utf8(p).ok().and_then(|s| open(&self.key, s)) {
+                    out.push(plain);
                 }
             }
         }
@@ -511,9 +558,113 @@ impl Mqtt {
 // Peer: the other player, reached directly or through the relay.
 // ---------------------------------------------------------------------------
 
+const STUN_SERVERS: [&str; 2] = ["stun.l.google.com:19302", "stun.cloudflare.com:3478"];
+const STUN_COOKIE: [u8; 4] = [0x21, 0x12, 0xA4, 0x42];
+
+fn stun_request() -> [u8; 20] {
+    let mut req = [0u8; 20];
+    req[1] = 0x01; // binding request
+    req[4..8].copy_from_slice(&STUN_COOKIE);
+    OsRng.fill_bytes(&mut req[8..]);
+    req
+}
+
+/// The public address a STUN server saw this socket's packet come from.
+fn parse_stun(d: &[u8]) -> Option<SocketAddr> {
+    if d.len() < 20 || d[0] != 0x01 || d[1] != 0x01 || d[4..8] != STUN_COOKIE {
+        return None;
+    }
+    let mut i = 20;
+    while i + 4 <= d.len() {
+        let kind = u16::from_be_bytes([d[i], d[i + 1]]);
+        let len = u16::from_be_bytes([d[i + 2], d[i + 3]]) as usize;
+        let v = d.get(i + 4..i + 4 + len)?;
+        if (kind == 0x0020 || kind == 0x0001) && len >= 8 && v[1] == 0x01 {
+            let x = if kind == 0x0020 { [0x21, 0x12, 0x21, 0x12, 0xA4, 0x42] } else { [0; 6] };
+            let port = u16::from_be_bytes([v[2] ^ x[0], v[3] ^ x[1]]);
+            let ip = std::net::Ipv4Addr::new(v[4] ^ x[2], v[5] ^ x[3], v[6] ^ x[4], v[7] ^ x[5]);
+            return Some(SocketAddr::new(ip.into(), port));
+        }
+        i += 4 + len.div_ceil(4) * 4;
+    }
+    None
+}
+
+/// Diagnostics: set BPB_NET_LOG to a file path to record connection events.
+fn net_log(text: &str) {
+    if let Ok(path) = std::env::var("BPB_NET_LOG") {
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+            let _ = writeln!(f, "{text}");
+        }
+    }
+}
+
+fn local_ipv4() -> Option<std::net::IpAddr> {
+    // Choosing a route sends nothing; it only reveals the local interface.
+    let s = UdpSocket::bind("0.0.0.0:0").ok()?;
+    s.connect("192.0.2.1:9").ok()?;
+    s.local_addr().ok().map(|a| a.ip())
+}
+
+/// Tries to open a direct path between two players who met on the relay
+/// ("hole punching"): each learns its own public address, they swap
+/// addresses through the relay, and both send to each other at once. When it
+/// works, play moves to the direct path, which is much quicker; when a
+/// router does not allow it, play simply stays on the relay.
+struct Punch {
+    sock: UdpSocket,
+    key: [u8; 32],
+    stun: Option<Receiver<Vec<SocketAddr>>>,
+    mine: Vec<SocketAddr>,
+    theirs: Vec<SocketAddr>,
+    /// The other player's address once a packet from them has arrived.
+    peer: Option<SocketAddr>,
+    heard: Instant,
+    tried: Instant,
+    offered: Instant,
+    started: Instant,
+}
+
+impl Punch {
+    fn new(key: &[u8; 32]) -> Option<Punch> {
+        let sock = UdpSocket::bind("0.0.0.0:0").ok()?;
+        sock.set_nonblocking(true).ok()?;
+        let port = sock.local_addr().ok()?.port();
+        let mine: Vec<SocketAddr> = local_ipv4().map(|ip| SocketAddr::new(ip, port)).into_iter().collect();
+        // Look the STUN servers up off the main thread; DNS can be slow.
+        let (tx, rx) = channel();
+        std::thread::spawn(move || {
+            let found: Vec<SocketAddr> = STUN_SERVERS
+                .iter()
+                .filter_map(|s| s.to_socket_addrs().ok())
+                .flatten()
+                .filter(|a| a.is_ipv4())
+                .collect();
+            let _ = tx.send(found);
+        });
+        let long_ago = Instant::now() - Duration::from_secs(60);
+        Some(Punch {
+            sock,
+            key: *key,
+            stun: Some(rx),
+            mine,
+            theirs: Vec::new(),
+            peer: None,
+            heard: Instant::now(),
+            tried: long_ago,
+            offered: long_ago,
+            started: Instant::now(),
+        })
+    }
+
+    fn send(&self, to: SocketAddr, me: &str, line: &str) {
+        let _ = self.sock.send_to(seal(&self.key, &format!("{me} {line}")).as_bytes(), to);
+    }
+}
+
 enum Link {
-    Direct { stream: TcpStream, buf: Vec<u8> },
-    Relay { mqtt: Mqtt, out: String, me: String, them: String },
+    Lan { stream: TcpStream, buf: Vec<u8> },
+    Relay { mqtt: Mqtt, out: String, me: String, them: String, udp: Option<Punch> },
 }
 
 pub struct Peer {
@@ -543,7 +694,7 @@ impl Peer {
     fn direct(stream: TcpStream) -> Peer {
         let _ = stream.set_nodelay(true);
         let _ = stream.set_nonblocking(true);
-        Peer::with(Link::Direct { stream, buf: Vec::new() })
+        Peer::with(Link::Lan { stream, buf: Vec::new() })
     }
 
     fn with(link: Link) -> Peer {
@@ -577,9 +728,88 @@ impl Peer {
         self.send_line(&format!("R {seq} {line}"));
     }
 
-    /// True when messages go through the internet relay rather than the LAN.
+    /// How messages are travelling right now.
+    pub fn path(&self) -> &'static str {
+        match &self.link {
+            Link::Lan { .. } => "SAME WI-FI",
+            Link::Relay { udp: Some(u), .. } if u.peer.is_some() => "DIRECT",
+            Link::Relay { .. } => "RELAY",
+        }
+    }
+
+    /// True while messages go through the internet relay.
     pub fn relayed(&self) -> bool {
-        matches!(self.link, Link::Relay { .. })
+        self.path() == "RELAY"
+    }
+
+    /// Send through the relay even when a direct path is up.
+    fn send_relay(&mut self, line: &str) {
+        if let Link::Relay { mqtt, out, me, .. } = &mut self.link {
+            let payload = format!("{me} {line}");
+            let topic = out.clone();
+            mqtt.publish(&topic, &payload);
+            self.alive = mqtt.alive;
+        }
+    }
+
+    /// Run the direct-path attempt and collect anything that arrived on it.
+    fn direct_tick(&mut self) -> Vec<String> {
+        let mut lines = Vec::new();
+        let Link::Relay { mqtt, out, me, them, udp: Some(u) } = &mut self.link else { return lines };
+        if let Some(Ok(servers)) = u.stun.as_ref().map(|rx| rx.try_recv()) {
+            u.stun = None;
+            for server in servers {
+                let _ = u.sock.send_to(&stun_request(), server);
+            }
+        }
+        let mut buf = [0u8; 4096];
+        while let Ok((n, from)) = u.sock.recv_from(&mut buf) {
+            let d = &buf[..n];
+            if let Some(public) = parse_stun(d) {
+                if !u.mine.contains(&public) {
+                    net_log(&format!("stun says my public address is {public}"));
+                    u.mine.push(public);
+                    u.offered = Instant::now() - Duration::from_secs(60);
+                }
+                continue;
+            }
+            let Some(plain) = std::str::from_utf8(d).ok().and_then(|s| open(&u.key, s)) else { continue };
+            let Some((sender, rest)) = plain.split_once(' ') else { continue };
+            if sender != them {
+                continue;
+            }
+            if u.peer != Some(from) {
+                net_log(&format!("direct path up with {from}"));
+                u.peer = Some(from);
+                u.send(from, me, "PUNCH");
+            }
+            u.heard = Instant::now();
+            if rest != "PUNCH" {
+                lines.push(rest.to_string());
+            }
+        }
+        // A direct path that has gone quiet is dropped; play continues on
+        // the relay while a new attempt runs.
+        if u.peer.is_some() && u.heard.elapsed() > Duration::from_secs(5) {
+            net_log("direct path went quiet; back on the relay");
+            u.peer = None;
+            u.started = Instant::now();
+        }
+        if u.peer.is_none() && u.started.elapsed() < Duration::from_secs(25) {
+            if u.offered.elapsed() > Duration::from_millis(1500) && !u.mine.is_empty() {
+                u.offered = Instant::now();
+                let list: Vec<String> = u.mine.iter().map(|a| a.to_string()).collect();
+                let topic = out.clone();
+                mqtt.publish(&topic, &format!("{me} UDP {}", list.join(" ")));
+            }
+            if u.tried.elapsed() > Duration::from_millis(200) {
+                u.tried = Instant::now();
+                for &addr in &u.theirs {
+                    u.send(addr, me, "PUNCH");
+                }
+            }
+        }
+        lines
     }
 
     fn send_line(&mut self, line: &str) {
@@ -587,10 +817,16 @@ impl Peer {
             return;
         }
         match &mut self.link {
-            Link::Direct { stream, .. } => {
+            Link::Lan { stream, .. } => {
                 let mut data = line.as_bytes().to_vec();
                 data.push(b'\n');
                 self.alive = write_fully(stream, &data);
+            }
+            Link::Relay { me, udp: Some(Punch { peer: Some(addr), .. }), .. } => {
+                let (addr, me) = (*addr, me.clone());
+                if let Link::Relay { udp: Some(u), .. } = &self.link {
+                    u.send(addr, &me, line);
+                }
             }
             Link::Relay { mqtt, out, me, .. } => {
                 let payload = format!("{me} {line}");
@@ -624,6 +860,9 @@ impl Peer {
             .collect();
         for (seq, line) in due {
             self.transmit(seq, &line);
+            if self.path() == "DIRECT" {
+                self.send_relay(&format!("R {seq} {line}"));
+            }
             if let Some(entry) = self.unacked.iter_mut().find(|e| e.0 == seq) {
                 entry.2 = Instant::now();
             }
@@ -642,7 +881,7 @@ impl Peer {
     fn incoming_lines(&mut self) -> Vec<String> {
         let mut lines = Vec::new();
         match &mut self.link {
-            Link::Direct { stream, buf } => {
+            Link::Lan { stream, buf } => {
                 let mut chunk = [0u8; 8192];
                 loop {
                     match stream.read(&mut chunk) {
@@ -684,6 +923,7 @@ impl Peer {
                 }
             }
         }
+        lines.extend(self.direct_tick());
         lines
     }
 
@@ -730,6 +970,15 @@ impl Peer {
                     let upto = self.expected - 1;
                     self.send_line(&format!("A {upto}"));
                 }
+                Some("UDP") => {
+                    if let Link::Relay { udp: Some(u), .. } = &mut self.link {
+                        let theirs: Vec<SocketAddr> = words.filter_map(|w| w.parse::<SocketAddr>().ok()).filter(|a| a.is_ipv4()).take(6).collect();
+                        if theirs != u.theirs {
+                            net_log(&format!("their addresses: {theirs:?} (mine: {:?})", u.mine));
+                        }
+                        u.theirs = theirs;
+                    }
+                }
                 Some("A") => {
                     if let Some(upto) = words.next().and_then(|w| w.parse::<u64>().ok()) {
                         while self.unacked.front().is_some_and(|e| e.0 <= upto) {
@@ -775,13 +1024,15 @@ impl Drop for Peer {
 pub struct Paths {
     pub lan: bool,
     pub relay: bool,
+    /// Try to move a relayed match onto a direct path.
+    pub direct: bool,
 }
 
 impl Paths {
     pub fn all() -> Paths {
         let relay_only = std::env::var("BPB_RELAY_ONLY").is_ok();
         let lan_only = std::env::var("BPB_LAN_ONLY").is_ok();
-        Paths { lan: !relay_only, relay: !lan_only }
+        Paths { lan: !relay_only, relay: !lan_only, direct: std::env::var("BPB_NO_DIRECT").is_err() }
     }
 }
 
@@ -795,6 +1046,8 @@ pub struct Room {
     listener: Option<TcpListener>,
     udp: Option<UdpSocket>,
     relay: Option<Mqtt>,
+    keys: Option<Keys>,
+    paths: Paths,
     id: String,
 }
 
@@ -839,13 +1092,16 @@ fn open_room(paths: Paths) -> Result<Room, String> {
     let id = random_id();
     // Use the first relay that answers; the code is chosen to point at it.
     let mut relay = None;
+    let mut keys = None;
     let mut code = random_code(0);
     if paths.relay {
         for index in relays_by_speed() {
             let candidate = random_code(index);
-            let will = (topic(&candidate, "g"), format!("{id} BYE"));
-            if let Ok(m) = Mqtt::connect(index, (&will.0, &will.1), &topic(&candidate, "h")) {
+            let k = Keys::derive(&candidate);
+            let will = (topic(&k, "g"), format!("{id} BYE"));
+            if let Ok(m) = Mqtt::connect(index, &k.key, (&will.0, &will.1), &topic(&k, "h")) {
                 relay = Some(m);
+                keys = Some(k);
                 code = candidate;
                 break;
             }
@@ -873,6 +1129,8 @@ fn open_room(paths: Paths) -> Result<Room, String> {
         listener,
         udp,
         relay,
+        keys,
+        paths,
         id,
     })
 }
@@ -915,20 +1173,21 @@ impl Room {
                 }
             }
         }
-        if let Some(m) = self.relay.as_mut() {
+        if let (Some(m), Some(keys)) = (self.relay.as_mut(), self.keys.clone()) {
             let payloads = m.poll();
             for (i, payload) in payloads.iter().enumerate() {
                 if let Some((guest, "HELLO")) = payload.split_once(' ') {
                     let guest = guest.to_string();
                     let welcome = format!("{} WELCOME {guest}", self.id);
-                    m.publish(&topic(&self.code, "g"), &welcome);
+                    m.publish(&topic(&keys, "g"), &welcome);
                     m.backlog = payloads[i + 1..].to_vec();
                     let mqtt = self.relay.take().unwrap();
                     return Some(Peer::with(Link::Relay {
                         mqtt,
-                        out: topic(&self.code, "g"),
+                        out: topic(&keys, "g"),
                         me: self.id.clone(),
                         them: guest,
+                        udp: self.paths.direct.then(|| Punch::new(&keys.key)).flatten(),
                     }));
                 }
             }
@@ -1013,14 +1272,15 @@ fn find_room(code: &str, paths: Paths) -> Result<Peer, String> {
     }
     let me = random_id();
     let index = relay_for(code);
-    let will = (topic(code, "h"), format!("{me} BYE"));
-    let mut mqtt = Mqtt::connect(index, (&will.0, &will.1), &topic(code, "g"))?;
+    let keys = Keys::derive(code);
+    let will = (topic(&keys, "h"), format!("{me} BYE"));
+    let mut mqtt = Mqtt::connect(index, &keys.key, (&will.0, &will.1), &topic(&keys, "g"))?;
     let hello = format!("{me} HELLO");
     let deadline = Instant::now() + Duration::from_secs(6);
     let mut last_hello = Instant::now() - Duration::from_secs(10);
     while Instant::now() < deadline {
         if last_hello.elapsed() > Duration::from_millis(1500) {
-            mqtt.publish(&topic(code, "h"), &hello);
+            mqtt.publish(&topic(&keys, "h"), &hello);
             last_hello = Instant::now();
         }
         let payloads = mqtt.poll();
@@ -1034,9 +1294,10 @@ fn find_room(code: &str, paths: Paths) -> Result<Peer, String> {
                     mqtt.backlog = payloads[i + 1..].to_vec();
                     return Ok(Peer::with(Link::Relay {
                         mqtt,
-                        out: topic(code, "h"),
+                        out: topic(&keys, "h"),
                         me,
                         them: host.to_string(),
+                        udp: paths.direct.then(|| Punch::new(&keys.key)).flatten(),
                     }));
                 }
             }
@@ -1137,6 +1398,41 @@ mod tests {
     }
 
     #[test]
+    fn messages_are_encrypted_with_the_room_key() {
+        let a = Keys::derive("K7QX2M");
+        let b = Keys::derive("K7QX2M");
+        let other = Keys::derive("K7QX2N");
+        assert_eq!((a.meeting.clone(), a.key), (b.meeting.clone(), b.key), "both players derive the same keys");
+        assert_ne!(a.meeting, other.meeting);
+        assert!(!a.meeting.contains("K7QX2M"), "the code itself never appears on the relay");
+        let sealed = seal(&a.key, "abc SHOT 1 2 3");
+        assert!(!sealed.contains("SHOT"));
+        assert_ne!(sealed, seal(&a.key, "abc SHOT 1 2 3"), "the same message never looks the same twice");
+        assert_eq!(open(&b.key, &sealed).as_deref(), Some("abc SHOT 1 2 3"));
+        assert_eq!(open(&other.key, &sealed), None, "a different room cannot read it");
+        let mut tampered = sealed.clone().into_bytes();
+        let last = tampered.len() - 1;
+        tampered[last] = if tampered[last] == b'0' { b'1' } else { b'0' };
+        assert_eq!(open(&a.key, std::str::from_utf8(&tampered).unwrap()), None, "tampering is detected");
+        assert_eq!(open(&a.key, "not hex at all"), None);
+    }
+
+    #[test]
+    fn stun_replies_are_understood() {
+        // A binding success response carrying XOR-MAPPED-ADDRESS 203.0.113.7:54321.
+        let mut d = vec![0x01, 0x01, 0x00, 0x0c];
+        d.extend_from_slice(&STUN_COOKIE);
+        d.extend_from_slice(&[7u8; 12]);
+        let port = 54321u16 ^ 0x2112;
+        d.extend_from_slice(&[0x00, 0x20, 0x00, 0x08, 0x00, 0x01]);
+        d.extend_from_slice(&port.to_be_bytes());
+        d.extend_from_slice(&[203 ^ 0x21, 0 ^ 0x12, 113 ^ 0xA4, 7 ^ 0x42]);
+        assert_eq!(parse_stun(&d), Some("203.0.113.7:54321".parse().unwrap()));
+        assert_eq!(parse_stun(&stun_request()), None, "a request is not a reply");
+        assert_eq!(parse_stun(b"hello"), None);
+    }
+
+    #[test]
     fn mqtt_packets_split_correctly() {
         let small = packet(0x30, b"hello");
         let big_body = vec![b'x'; 300];
@@ -1225,14 +1521,14 @@ mod tests {
 
     #[test]
     fn players_meet_on_the_local_network_by_code() {
-        let (host, guest) = pair(Paths { lan: true, relay: false });
+        let (host, guest) = pair(Paths { lan: true, relay: false, direct: false });
         assert!(!host.relayed() && !guest.relayed());
         exchange(host, guest);
     }
 
     #[test]
     fn lost_messages_are_resent_in_order() {
-        let (mut host, mut guest) = pair(Paths { lan: true, relay: false });
+        let (mut host, mut guest) = pair(Paths { lan: true, relay: false, direct: false });
         // The first two numbered messages vanish on the way.
         host.drop_next = 2;
         for m in samples() {
@@ -1262,11 +1558,36 @@ mod tests {
 
     #[test]
     fn a_wrong_code_is_rejected_quickly() {
-        let r = join_room("ZZZZZZ", Paths { lan: true, relay: false })
+        let r = join_room("ZZZZZZ", Paths { lan: true, relay: false, direct: false })
             .recv_timeout(Duration::from_secs(5))
             .unwrap();
         assert!(r.is_err());
         assert!(join_room("nope", Paths::all()).recv_timeout(Duration::from_secs(2)).unwrap().is_err());
+    }
+
+    /// Two players who met on the relay move to a direct path by themselves.
+    /// Needs the internet: `cargo test --release direct -- --ignored`
+    #[test]
+    #[ignore]
+    fn relayed_players_upgrade_to_a_direct_path() {
+        let (mut host, mut guest) = pair(Paths { lan: false, relay: true, direct: true });
+        for _ in 0..2000 {
+            host.poll();
+            guest.poll();
+            if host.path() == "DIRECT" && guest.path() == "DIRECT" {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!((host.path(), guest.path()), ("DIRECT", "DIRECT"));
+        // Let a ping travel the new path, then check it is quick.
+        for _ in 0..700 {
+            host.poll();
+            guest.poll();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(host.rtt_ms.is_some_and(|ms| ms < 100), "direct round trip was {:?} ms", host.rtt_ms);
+        exchange(host, guest);
     }
 
     /// Uses the real public relay, so it needs the internet:
@@ -1274,7 +1595,7 @@ mod tests {
     #[test]
     #[ignore]
     fn players_meet_through_the_internet_relay() {
-        let (host, guest) = pair(Paths { lan: false, relay: true });
+        let (host, guest) = pair(Paths { lan: false, relay: true, direct: false });
         assert!(host.relayed() && guest.relayed());
         exchange(host, guest);
     }

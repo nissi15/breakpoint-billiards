@@ -83,17 +83,20 @@ Aim from behind the cue, then the view lifts to watch the shot and drops back fo
 
 ## Install
 
-### Option 1: download (recommended)
+Open **PowerShell** (press Start, type `powershell`, press Enter), paste this line and press Enter:
 
-1. Open the [**latest release**](https://github.com/nissi15/breakpoint-billiards/releases/latest).
-2. Download **`BreakpointBilliards-x.y.z-Setup.exe`** and run it.<br>
-   *Prefer no installer?* Download the **`.zip`**, extract it and double-click `breakpoint-billiards.exe`, or `install.cmd` to add Start menu and desktop shortcuts.
+```powershell
+irm https://raw.githubusercontent.com/nissi15/breakpoint-billiards/main/install.ps1 | iex
+```
 
-> Windows SmartScreen may say it "protected your PC" because the game isn't code-signed. Click **More info → Run anyway**.
+That's it. The game is downloaded, added to your Start menu and desktop, and listed under **Settings → Apps** so you can uninstall it like any other game. No administrator rights and no security warnings.
 
-### Option 2: clone and install
+<details>
+<summary><b>Other ways to get it</b></summary>
 
-You need [Git](https://git-scm.com) and [Rust](https://rustup.rs).
+**Just the game file.** Download [`breakpoint-billiards.exe`](https://github.com/nissi15/breakpoint-billiards/releases/latest/download/breakpoint-billiards.exe) and double-click it; nothing is installed. Because the file isn't code-signed, Windows SmartScreen will say it "protected your PC" the first time: click **More info → Run anyway**.
+
+**From source.** With [Git](https://git-scm.com) and [Rust](https://rustup.rs) installed:
 
 ```powershell
 git clone https://github.com/nissi15/breakpoint-billiards.git
@@ -101,9 +104,7 @@ cd breakpoint-billiards
 .\install.cmd
 ```
 
-This builds the game, installs it to `%LOCALAPPDATA%\Programs\Breakpoint Billiards`, adds Start menu and desktop shortcuts, and lists it under **Settings → Apps** so it uninstalls like any other game.
-
-**Uninstall:** Settings → Apps → *Breakpoint Billiards* → Uninstall, or run `uninstall.ps1`.
+</details>
 
 ## Play a friend online
 
@@ -119,12 +120,10 @@ This builds the game, installs it to `%LOCALAPPDATA%\Programs\Breakpoint Billiar
 ```
 
 - **The host picks the game** (8-Ball or 9-Ball); the guest joins with the code. Paste with **Ctrl+V**.
-- **Same Wi-Fi?** The game finds the room on your network and connects directly.
-- **Anywhere else?** Both players meet through a free public relay. Only shots travel over the internet, so it stays quick even on slow connections. The HUD shows the current delay, for example `ONLINE 84 ms`.
-- Every important message is confirmed by the other player and re-sent if the relay drops it, so a match never stalls on a lost shot.
-- Both computers run the same physics, and after every shot the shooter's final ball positions are shared, so the two tables can never drift apart.
-
-> **Privacy:** the relay is public and messages aren't encrypted. They only contain shot data, never names or files, but don't use room codes for anything sensitive.
+- **Same Wi-Fi?** The game finds the room on your network and connects straight away.
+- **Anywhere else?** You meet through a free public relay, then the two games try to connect directly to each other. When that works the HUD shows `ONLINE (DIRECT)` and the delay drops to almost nothing; if a router blocks it, play continues through the relay.
+- **Private.** Everything sent over the internet is encrypted with a key made from your room code, so only the two of you can read it or take part.
+- **Reliable.** Every shot is confirmed by the other player and re-sent if it gets lost, and after each shot the final ball positions are shared, so the two tables can never drift apart.
 
 ## Controls
 
@@ -162,7 +161,7 @@ Breakpoint Billiards is about 7,500 lines of Rust on top of [macroquad](https://
 | [`physics.rs`](src/physics.rs) | Fixed-step rigid-ball simulation: sliding and rolling friction, spin, ball-ball throw, cushion rebound with english, pockets. Deterministic, so the same shot always plays the same way. |
 | [`rules.rs`](src/rules.rs) | The WPA referee for 8-Ball and 9-Ball, written as pure functions so the AI uses exactly the same judgement. |
 | [`ai.rs`](src/ai.rs) | The computer opponent: generates shots, simulates each in the real physics, scores the result and the position it leaves. |
-| [`net.rs`](src/net.rs) | Room codes, LAN discovery, direct TCP, and a tiny built-in MQTT client for the internet relay. |
+| [`net.rs`](src/net.rs) | Room codes, LAN discovery, encrypted messaging through a public MQTT relay, and UDP hole punching for a direct path. |
 | [`render.rs`](src/render.rs) | Shaders for the cloth, rails and balls, plus the 3D table and cue. |
 | [`menu.rs`](src/menu.rs), [`main.rs`](src/main.rs) | Menus, camera, HUD, input and the game loop. |
 
@@ -171,10 +170,10 @@ Breakpoint Billiards is about 7,500 lines of Rust on top of [macroquad](https://
 ```powershell
 cargo run --release          # play
 cargo test --release         # run the test suite
-cargo test --release relay -- --ignored   # also test the internet relay (needs internet)
+cargo test --release -- --include-ignored   # also test the internet relay and direct path
 ```
 
-Releases are built by GitHub Actions: pushing a tag like `v1.0.1` tests the game, then publishes a release with the installer and the portable zip.
+Releases are built by GitHub Actions: pushing a tag like `v1.0.1` tests the game, then publishes a release with the game attached.
 
 ## System requirements
 

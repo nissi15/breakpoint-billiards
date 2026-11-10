@@ -1648,7 +1648,11 @@ impl Game {
         };
         let title_line = match &self.net {
             Some(p) => {
-                let path = if p.relayed() { "ONLINE" } else { "SAME WI-FI" };
+                let path = match p.path() {
+                    "RELAY" => "ONLINE (RELAY)",
+                    "DIRECT" => "ONLINE (DIRECT)",
+                    other => other,
+                };
                 match p.rtt_ms {
                     Some(ms) => format!("{title}   |   {path}   {ms} ms"),
                     None => format!("{title}   |   {path}"),
