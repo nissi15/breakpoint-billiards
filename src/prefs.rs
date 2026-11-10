@@ -14,6 +14,8 @@ pub struct Prefs {
     pub guide: u8,
     pub pocket_hints: bool,
     pub sound: bool,
+    /// 0 = off .. 3 = high.
+    pub music: u8,
     pub fullscreen: bool,
 }
 
@@ -28,6 +30,7 @@ impl Default for Prefs {
             guide: 0,
             pocket_hints: true,
             sound: true,
+            music: 2,
             fullscreen: true,
         }
     }
@@ -61,14 +64,15 @@ impl Prefs {
             guide: map.get("guide").and_then(|v| v.parse().ok()).filter(|g| *g <= 2).unwrap_or(d.guide),
             pocket_hints: b("pocket_hints", d.pocket_hints),
             sound: b("sound", d.sound),
+            music: map.get("music").and_then(|v| v.parse().ok()).filter(|m| *m <= 3).unwrap_or(d.music),
             fullscreen: b("fullscreen", d.fullscreen),
         }
     }
 
     pub fn to_text(&self) -> String {
         format!(
-            "# Breakpoint Billiards settings\nmode={}\nopponent={}\nlevel={}\ntheme={}\nview={}\nguide={}\npocket_hints={}\nsound={}\nfullscreen={}\n",
-            self.mode, self.opponent, self.level, self.theme, self.view, self.guide, self.pocket_hints, self.sound, self.fullscreen
+            "# Breakpoint Billiards settings\nmode={}\nopponent={}\nlevel={}\ntheme={}\nview={}\nguide={}\npocket_hints={}\nsound={}\nmusic={}\nfullscreen={}\n",
+            self.mode, self.opponent, self.level, self.theme, self.view, self.guide, self.pocket_hints, self.sound, self.music, self.fullscreen
         )
     }
 
@@ -96,9 +100,9 @@ mod tests {
 
     #[test]
     fn settings_round_trip_and_survive_junk() {
-        let p = Prefs { theme: 7, guide: 2, sound: false, view: "orbit".into(), ..Prefs::default() };
+        let p = Prefs { theme: 7, guide: 2, sound: false, music: 1, view: "orbit".into(), ..Prefs::default() };
         assert_eq!(Prefs::parse(&p.to_text()), p);
-        let junk = Prefs::parse("theme=banana\nguide=9\nnonsense\n=\n");
+        let junk = Prefs::parse("theme=banana\nguide=9\nmusic=7\nnonsense\n=\n");
         assert_eq!(junk, Prefs::default());
     }
 }

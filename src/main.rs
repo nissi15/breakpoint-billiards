@@ -3,6 +3,7 @@
 mod ai;
 mod audio;
 mod menu;
+mod music;
 mod net;
 mod prefs;
 mod physics;
@@ -2004,7 +2005,9 @@ fn settings_from(p: &prefs::Prefs, settings: &mut Settings) {
     settings.fullscreen = p.fullscreen;
 }
 
-fn prefs_from(settings: &Settings, theme: usize, sound: bool) -> prefs::Prefs {
+fn prefs_from(settings: &Settings, theme: usize, sfx: &Sfx) -> prefs::Prefs {
+    let sound = sfx.0.as_ref().is_none_or(|s| s.enabled);
+    let music = sfx.0.as_ref().map_or(2, |s| s.music_level);
     let level = |d: Difficulty| match d {
         Difficulty::Easy => "easy",
         Difficulty::Medium => "medium",
@@ -2035,6 +2038,7 @@ fn prefs_from(settings: &Settings, theme: usize, sound: bool) -> prefs::Prefs {
         guide: settings.guide,
         pocket_hints: settings.pocket_hints,
         sound,
+        music,
         fullscreen: settings.fullscreen,
     }
 }
@@ -2086,13 +2090,15 @@ async fn main() {
         r.theme = saved.theme % THEMES.len();
         if let Some(s) = sfx.0.as_mut() {
             s.enabled = saved.sound;
+            s.music_level = saved.music;
         }
         if !settings.fullscreen {
             set_fullscreen(false);
         }
     }
-    let mut last_saved = prefs_from(&settings, r.theme, sfx.0.as_ref().is_none_or(|s| s.enabled));
-    if capture.is_some() || settings.autoplay {
+    let mut last_saved = prefs_from(&settings, r.theme, &sfx);
+    // BPB_TEST_SOUND keeps sound on during self-play so it can be recorded.
+    if (capture.is_some() || settings.autoplay) && std::env::var_os("BPB_TEST_SOUND").is_none() {
         if let Some(s) = sfx.0.as_mut() {
             s.muted = true;
         }
@@ -2182,6 +2188,9 @@ async fn main() {
         if is_key_pressed(KeyCode::F11) {
             settings.fullscreen = !settings.fullscreen;
             set_fullscreen(settings.fullscreen);
+        }
+        if let Some(s) = sfx.0.as_mut() {
+            s.update_music(game.is_some(), dt).await;
         }
         clear_background(BLACK);
 
@@ -2361,7 +2370,7 @@ async fn main() {
             }
         }
         if !scripted {
-            let now = prefs_from(&settings, r.theme, sfx.0.as_ref().is_none_or(|s| s.enabled));
+            let now = prefs_from(&settings, r.theme, &sfx);
             if now != last_saved {
                 now.save();
                 last_saved = now;

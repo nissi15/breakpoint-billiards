@@ -1,6 +1,6 @@
 [package]
 name = "breakpoint-billiards"
-version = "1.0.0"
+version = "1.1.0"
 edition = "2024"
 description = "A realistic 3D pool game: 960 Hz physics, official WPA 8-ball and 9-ball rules, an elite computer opponent and online rooms you join with a 6-letter code."
 license = "MIT"
@@ -11,7 +11,7 @@ categories = ["games"]
 build = "build.rs"
 
 [dependencies]
-macroquad = "0.4"
+macroquad = { version = "0.4", features = ["audio"] }
 chacha20poly1305 = "0.10"
 pbkdf2 = "0.12"
 sha2 = "0.10"

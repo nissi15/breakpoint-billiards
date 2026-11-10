@@ -1,11 +1,17 @@
-//! Sound effects, synthesised at start-up so the game ships as a single file.
+//! Sound effects and music, synthesised at start-up so the game ships as a
+//! single file.
 
 use crate::physics::Rng;
-use macroquad::audio::{PlaySoundParams, Sound, load_sound_from_bytes, play_sound};
+use macroquad::audio::{PlaySoundParams, Sound, load_sound_from_bytes, play_sound, set_sound_volume};
+use std::sync::mpsc::{Receiver, channel};
+
+/// Music volume for each step of the menu's MUSIC control (OFF, LOW, MID, HIGH).
+pub const MUSIC_LEVELS: [f32; 4] = [0.0, 0.22, 0.40, 0.62];
 
 const RATE: u32 = 44_100;
 
-fn wav(samples: &[f32]) -> Vec<u8> {
+/// 16-bit PCM WAV; `samples` is interleaved when `channels` is 2.
+pub fn wav(samples: &[f32], channels: u16) -> Vec<u8> {
     let data_len = (samples.len() * 2) as u32;
     let mut out = Vec::with_capacity(44 + samples.len() * 2);
     out.extend_from_slice(b"RIFF");
@@ -13,10 +19,10 @@ fn wav(samples: &[f32]) -> Vec<u8> {
     out.extend_from_slice(b"WAVEfmt ");
     out.extend_from_slice(&16u32.to_le_bytes());
     out.extend_from_slice(&1u16.to_le_bytes()); // PCM
-    out.extend_from_slice(&1u16.to_le_bytes()); // mono
+    out.extend_from_slice(&channels.to_le_bytes());
     out.extend_from_slice(&RATE.to_le_bytes());
-    out.extend_from_slice(&(RATE * 2).to_le_bytes());
-    out.extend_from_slice(&2u16.to_le_bytes());
+    out.extend_from_slice(&(RATE * 2 * channels as u32).to_le_bytes());
+    out.extend_from_slice(&(2 * channels).to_le_bytes());
     out.extend_from_slice(&16u16.to_le_bytes());
     out.extend_from_slice(b"data");
     out.extend_from_slice(&data_len.to_le_bytes());
@@ -40,7 +46,7 @@ fn synth(seconds: f32, mut f: impl FnMut(f32, f32) -> f32) -> Vec<u8> {
             f(t, lp) * fade
         })
         .collect();
-    wav(&samples)
+    wav(&samples, 1)
 }
 
 fn tone(t: f32, hz: f32) -> f32 {
@@ -58,6 +64,12 @@ pub struct Sounds {
     rack: Sound,
     foul: Sound,
     pub enabled: bool,
+    /// Background music, once the worker thread has rendered it.
+    music: Option<Sound>,
+    music_job: Option<Receiver<Vec<u8>>>,
+    /// Index into MUSIC_LEVELS.
+    pub music_level: u8,
+    music_volume: f32,
     /// Silences everything without changing the player's setting
     /// (used for automated screenshots and self-play).
     pub muted: bool,
@@ -65,6 +77,11 @@ pub struct Sounds {
 
 impl Sounds {
     pub async fn load() -> Option<Sounds> {
+        // The music takes a moment to render; do it while the game starts.
+        let (tx, rx) = channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(crate::music::render());
+        });
         // Two phenolic balls meeting: a very short, bright knock.
         let clack = synth(0.06, |t, n| {
             let env = (-t * 150.0).exp();
@@ -154,8 +171,38 @@ impl Sounds {
             rack: load_sound_from_bytes(&rack).await.ok()?,
             foul: load_sound_from_bytes(&foul).await.ok()?,
             enabled: true,
+            music: None,
+            music_job: Some(rx),
+            music_level: 2,
+            music_volume: 0.0,
             muted: false,
         })
+    }
+
+    /// Start the music when it is ready and ease its volume toward the
+    /// chosen level; it sits a little lower during a match so the balls
+    /// stay clear.
+    pub async fn update_music(&mut self, in_match: bool, dt: f32) {
+        if self.music.is_none() {
+            let Some(job) = &self.music_job else { return };
+            let Ok(bytes) = job.try_recv() else { return };
+            self.music_job = None;
+            let Ok(sound) = load_sound_from_bytes(&bytes).await else { return };
+            play_sound(&sound, PlaySoundParams { looped: true, volume: 0.0 });
+            self.music = Some(sound);
+        }
+        let level = MUSIC_LEVELS[(self.music_level as usize).min(MUSIC_LEVELS.len() - 1)];
+        let target = if self.muted { 0.0 } else { level * if in_match { 0.75 } else { 1.0 } };
+        let before = self.music_volume;
+        self.music_volume += (target - before) * (dt * 1.8).min(1.0);
+        if (target - self.music_volume).abs() < 0.002 {
+            self.music_volume = target;
+        }
+        if self.music_volume != before {
+            if let Some(m) = &self.music {
+                set_sound_volume(m, self.music_volume);
+            }
+        }
     }
 
     fn play(&self, s: &Sound, volume: f32) {

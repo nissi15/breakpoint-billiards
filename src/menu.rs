@@ -463,18 +463,32 @@ pub fn menu(
     }
 
     // Switches
-    let sy = y0 + 422.0 * ui;
+    let sy = y0 + 416.0 * ui;
+    let step = 38.0 * ui;
     if toggle(r, sfx, bx, sy, col_w, "Pocket hints", "Show the pocket each ball is headed for", settings.pocket_hints, ui) {
         settings.pocket_hints = !settings.pocket_hints;
     }
     let sound_on = sfx.0.as_ref().is_some_and(|s| s.enabled);
     let sound_sub = if sfx.0.is_none() { "No audio device found" } else { "Clacks, cushions and pockets" };
-    if toggle(r, sfx, bx, sy + 44.0 * ui, col_w, "Sound", sound_sub, sound_on, ui) {
+    if toggle(r, sfx, bx, sy + step, col_w, "Sound effects", sound_sub, sound_on, ui) {
         if let Some(s) = sfx.0.as_mut() {
             s.enabled = !s.enabled;
         }
     }
-    if toggle(r, sfx, bx, sy + 88.0 * ui, col_w, "Fullscreen", "Also F11 at any time", settings.fullscreen, ui) {
+    // Music: a name on the left, a four-step level control on the right.
+    let my = sy + 2.0 * step;
+    let hover = Rect::new(bx, my, col_w, 30.0 * ui).contains(mouse());
+    r.text("Music", bx, my + 9.0 * ui, 13.5 * ui, if hover { PALE } else { Color::new(0.85, 0.87, 0.9, 1.0) }, true);
+    r.text("Late-night lounge jazz", bx, my + 25.0 * ui, 11.0 * ui, MUTED, false);
+    let level = sfx.0.as_ref().map_or(0, |s| s.music_level as usize);
+    let seg_w = 176.0 * ui;
+    let seg = Rect::new(bx + col_w - seg_w, my + 2.0 * ui, seg_w, 26.0 * ui);
+    if let Some(k) = segmented(r, sfx, seg, &["OFF", "LOW", "MID", "HIGH"], level, ui) {
+        if let Some(s) = sfx.0.as_mut() {
+            s.music_level = k as u8;
+        }
+    }
+    if toggle(r, sfx, bx, sy + 3.0 * step, col_w, "Fullscreen", "Also F11 at any time", settings.fullscreen, ui) {
         settings.fullscreen = !settings.fullscreen;
         set_fullscreen(settings.fullscreen);
     }
