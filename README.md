@@ -126,7 +126,7 @@ cd breakpoint-billiards
 - **Anywhere else?** You meet through a free public relay, then the two games try to connect directly to each other. When that works the HUD shows `ONLINE (DIRECT)` and the delay drops to almost nothing; if a router blocks it, play continues through the relay.
 - **Private.** Everything sent over the internet is encrypted with a key made from your room code, so only the two of you can read it or take part.
 - **Chat.** Press **Enter** to send your opponent a message. Chat is encrypted like everything else.
-- **Same rules, same view.** The host's *Call the pocket* choice applies to both players, and while your opponent aims you see the aim guide they are using.
+- **Same rules, same view.** The host's *Call the pocket* and *Behind the line* choices apply to both players, and while your opponent aims you see the aim guide they are using.
 - **Shot clock.** You have 30 seconds a shot, as on the professional tour, with 60 for the break and the shot after it. Each player can press **E** once a rack for 30 more. Running out is a foul: your opponent gets ball in hand.
 - **Reliable.** Every shot is confirmed by the other player and re-sent if it gets lost, and after each shot the final ball positions are shared, so the two tables can never drift apart.
 
@@ -152,6 +152,8 @@ cd breakpoint-billiards
 <summary><b>Rules in brief</b></summary>
 
 **8-Ball.** Pocket all of your group (solids 1–7 or stripes 9–15), then the 8. Any of your balls that drops without a foul keeps you at the table, and the 8 wins in any pocket once your group is gone. Pocketing the 8 early or on a foul loses the rack. Turn on **Call the pocket** in the menu for the strict tournament rule: every shot after the break must then be called (obvious shots are called for you, otherwise click the pocket), and the 8 in an uncalled pocket loses. An illegal break, or the 8 down on the break, gives the right player a choice of how to continue.
+
+**Behind the line.** By the official rules a foul gives your opponent the white ball anywhere on the table. Turn on **Behind the line** in the menu for the common bar rule instead: after any foul the white ball is placed behind the head string and must be played forward, out of that area. If the only ball you may hit is behind the line too, it is moved to the foot spot.
 
 **9-Ball.** Always hit the lowest-numbered ball first. Any legally pocketed ball keeps you at the table, and the legal 9 wins. Straight after the break you may play a *push out*. Three fouls in a row lose the rack.
 

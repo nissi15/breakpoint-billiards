@@ -108,6 +108,8 @@ struct Settings {
     pocket_hints: bool,
     /// 8-ball: shots must be called. Online, the host's choice is used.
     call_shots: bool,
+    /// After a foul the cue ball goes behind the line. Online, the host's.
+    line_fouls: bool,
     /// Testing aid: the computer plays the local player's turns too.
     autoplay: bool,
     log: Option<String>,
@@ -416,6 +418,7 @@ impl Game {
         };
         let mut rules = Rules::new(settings.mode, names, first);
         rules.call_shots = settings.call_shots;
+        rules.line_fouls = settings.line_fouls;
         let ctx = rules.context(&world);
         let mut g = Game {
             world,
@@ -2289,6 +2292,7 @@ fn settings_from(p: &prefs::Prefs, settings: &mut Settings) {
     settings.guide = p.guide.min(2);
     settings.pocket_hints = p.pocket_hints;
     settings.call_shots = p.call_shots;
+    settings.line_fouls = p.line_fouls;
     settings.fullscreen = p.fullscreen;
 }
 
@@ -2325,6 +2329,7 @@ fn prefs_from(settings: &Settings, theme: usize, sfx: &Sfx) -> prefs::Prefs {
         guide: settings.guide,
         pocket_hints: settings.pocket_hints,
         call_shots: settings.call_shots,
+        line_fouls: settings.line_fouls,
         sound,
         music,
         fullscreen: settings.fullscreen,
@@ -2372,6 +2377,7 @@ async fn main() {
         },
         pocket_hints: !has_arg("--no-pocket-hints"),
         call_shots: has_arg("--call-shots"),
+        line_fouls: has_arg("--line-fouls"),
         autoplay: has_arg("--autoplay"),
         log: arg_value("--log"),
     };
@@ -2490,7 +2496,7 @@ async fn main() {
         clear_background(BLACK);
 
         // Online lobby: turn a finished connection into a game.
-        let mut start: Option<(Peer, usize, u64, usize, bool)> = None;
+        let mut start: Option<(Peer, usize, u64, usize, bool, bool)> = None;
         lobby = match std::mem::replace(&mut lobby, Lobby::Idle) {
             Lobby::Creating(rx) => match rx.try_recv() {
                 Ok(Ok(room)) => {
@@ -2511,8 +2517,9 @@ async fn main() {
                         seed,
                         first: 0,
                         calls: settings.call_shots,
+                        line: settings.line_fouls,
                     });
-                    start = Some((peer, 0, seed, 0, settings.call_shots));
+                    start = Some((peer, 0, seed, 0, settings.call_shots, settings.line_fouls));
                     Lobby::Idle
                 }
                 None => Lobby::Hosting(room),
@@ -2526,18 +2533,18 @@ async fn main() {
             Lobby::Joined(mut peer) => {
                 let mut begun = None;
                 for m in peer.poll() {
-                    if let Msg::Start { mode, seed, first, calls } = m {
-                        begun = Some((mode, seed, first, calls));
+                    if let Msg::Start { mode, seed, first, calls, line } = m {
+                        begun = Some((mode, seed, first, calls, line));
                     }
                 }
                 match begun {
-                    Some((mode, seed, first, calls)) => {
+                    Some((mode, seed, first, calls, line)) => {
                         settings.mode = if mode == 1 {
                             Mode::NineBall
                         } else {
                             Mode::EightBall
                         };
-                        start = Some((peer, 1, seed, (first as usize).min(1), calls));
+                        start = Some((peer, 1, seed, (first as usize).min(1), calls, line));
                         Lobby::Idle
                     }
                     None if !peer.alive => Lobby::Failed("The host closed the connection".into()),
@@ -2546,16 +2553,20 @@ async fn main() {
             }
             other => other,
         };
-        if let Some((peer, local, seed, first, calls)) = start {
+        if let Some((peer, local, seed, first, calls, line)) = start {
             settings.opponent = Opponent::Online;
             wins = [0, 0];
             breaker = first;
             let mut g = Game::new(&settings, first, seed, Some(peer), local);
             // Both players use the host's rule.
             g.rules.call_shots = calls;
+            g.rules.line_fouls = line;
+            let mut house = Vec::new();
             if settings.mode == Mode::EightBall {
-                g.say(if calls { "Call the pocket: on" } else { "Any pocket counts (call the pocket: off)" });
+                house.push(if calls { "Call the pocket" } else { "Any pocket counts" });
             }
+            house.push(if line { "Fouls: white ball behind the line" } else { "Fouls: ball in hand anywhere" });
+            g.say(&house.join("  |  "));
             game = Some(g);
         }
 
@@ -2579,6 +2590,7 @@ async fn main() {
                     let peer = g.net.take();
                     let mut n = Game::new(&settings, first, seed, peer, 1);
                     n.rules.call_shots = g.rules.call_shots;
+                    n.rules.line_fouls = g.rules.line_fouls;
                     next = Some(n);
                 }
             }
@@ -2603,11 +2615,13 @@ async fn main() {
                             seed,
                             first: breaker as u8,
                             calls: g.rules.call_shots,
+                            line: g.rules.line_fouls,
                         });
                     }
                     let local = g.local;
                     let mut n = Game::new(&settings, breaker, seed, peer, local);
                     n.rules.call_shots = g.rules.call_shots;
+                    n.rules.line_fouls = g.rules.line_fouls;
                     next = Some(n);
                 }
                 Action::Menu => to_menu = true,

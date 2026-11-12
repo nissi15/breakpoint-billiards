@@ -32,21 +32,72 @@ pub fn wav(samples: &[f32], channels: u16) -> Vec<u8> {
     out
 }
 
-/// Build a sound from a function of time (seconds) and a noise source.
-fn synth(seconds: f32, mut f: impl FnMut(f32, f32) -> f32) -> Vec<u8> {
+/// Build a sound from a function of time (seconds), soft low-passed noise
+/// and raw white noise.
+fn render(seconds: f32, mut f: impl FnMut(f32, f32, f32) -> f32) -> Vec<f32> {
     let mut rng = Rng::new(0xB111);
     let n = (seconds * RATE as f32) as usize;
     let mut lp = 0.0f32;
-    let samples: Vec<f32> = (0..n)
+    (0..n)
         .map(|i| {
             let t = i as f32 / RATE as f32;
+            let white = rng.signed() as f32;
             // Low-passed noise sounds like felt and wood rather than hiss.
-            lp += (rng.signed() as f32 - lp) * 0.35;
+            lp += (white - lp) * 0.35;
             let fade = ((n - i) as f32 / (RATE as f32 * 0.004)).min(1.0);
-            f(t, lp) * fade
+            f(t, lp, white) * fade
         })
-        .collect();
-    wav(&samples, 1)
+        .collect()
+}
+
+fn synth(seconds: f32, mut f: impl FnMut(f32, f32) -> f32) -> Vec<u8> {
+    wav(&render(seconds, |t, lp, _| f(t, lp)), 1)
+}
+
+/// Scale a sound so its loudest sample sits just under full level.
+fn level(mut s: Vec<f32>) -> Vec<f32> {
+    let peak = s.iter().fold(0.0f32, |m, x| m.max(x.abs())).max(1e-6);
+    for x in &mut s {
+        *x *= 0.92 / peak;
+    }
+    s
+}
+
+/// Two balls meeting, for one of three strengths (0 soft, 1 medium, 2 hard).
+///
+/// Measured ball-to-ball contact lasts only about 0.25 to 0.3 thousandths of
+/// a second, and the balls themselves ring far above hearing, so the real
+/// sound is not a note: it is one sharp broadband click centred around
+/// 3-4 kHz that is over in a millisecond or two, followed by the table and
+/// the room answering. A harder hit has a shorter contact, so it is brighter
+/// as well as louder, and it shakes the slate bed enough to add a low thump.
+fn clack_samples(strength: usize) -> Vec<f32> {
+    let (hz, bed) = [(2500.0, 0.03), (3300.0, 0.07), (4200.0, 0.13)][strength.min(2)];
+    level(render(0.07, |t, lp, white| {
+        // The click itself: gone within a couple of milliseconds.
+        let click = (tone(t, hz) * 0.75 + tone(t, hz * 1.62) * 0.35) * (-t * 1600.0).exp()
+            + white * 0.55 * (-t * 2600.0).exp();
+        // The cloth-covered slate and the room: a short dull tail.
+        let tail = tone(t, hz * 0.52) * 0.16 * (-t * 380.0).exp() + lp * 0.10 * (-t * 110.0).exp();
+        let thump = tone(t, 205.0) * bed * (-t * 55.0).exp();
+        click + tail + thump
+    }))
+}
+
+/// The cue tip on the cue ball (0 an ordinary stroke, 1 a hard one).
+///
+/// A leather tip stays on the ball four to eight times longer than two
+/// balls touch (about 1 to 2 thousandths of a second; less for a hard,
+/// fast hit), so this is a lower, rounder "tock" than the ball click, with
+/// a little of the wooden shaft ringing after it.
+fn cue_samples(strength: usize) -> Vec<f32> {
+    let (hz, crack, shaft) = [(420.0, 0.30, 0.16), (640.0, 0.60, 0.26)][strength.min(1)];
+    level(render(0.08, |t, lp, white| {
+        let thud = tone(t, hz) * 0.75 * (-t * 420.0).exp();
+        let leather = lp * 0.55 * (-t * 700.0).exp() + white * crack * 0.5 * (-t * 1900.0).exp();
+        let wood = (tone(t, 1180.0) * shaft + tone(t, 2450.0) * shaft * 0.5) * (-t * 190.0).exp();
+        thud + leather + wood
+    }))
 }
 
 fn tone(t: f32, hz: f32) -> f32 {
@@ -54,10 +105,12 @@ fn tone(t: f32, hz: f32) -> f32 {
 }
 
 pub struct Sounds {
-    clack: Sound,
+    /// Ball on ball: soft, medium and hard.
+    clack: [Sound; 3],
     cushion: Sound,
     pocket: Sound,
-    cue: Sound,
+    /// Tip on the cue ball: an ordinary stroke and a hard one.
+    cue: [Sound; 2],
     click: Sound,
     chime: Sound,
     knock: Sound,
@@ -82,12 +135,6 @@ impl Sounds {
         std::thread::spawn(move || {
             let _ = tx.send(crate::music::render());
         });
-        // Two phenolic balls meeting: a very short, bright knock.
-        let clack = synth(0.06, |t, n| {
-            let env = (-t * 150.0).exp();
-            let body = tone(t, 2350.0) * 0.5 + tone(t, 3900.0) * 0.3 + tone(t, 5600.0) * 0.15;
-            (body * env + n * (-t * 900.0).exp() * 0.9) * 0.9
-        });
         // Rubber cushion: a dull thud.
         let cushion = synth(0.12, |t, n| {
             let env = (-t * 55.0).exp();
@@ -109,11 +156,6 @@ impl Sounds {
                 }
             }
             s * 0.8
-        });
-        // Leather tip on the cue ball.
-        let cue = synth(0.07, |t, n| {
-            let env = (-t * 110.0).exp();
-            (tone(t, 880.0) * 0.45 + tone(t, 1750.0) * 0.25) * env + n * (-t * 500.0).exp() * 0.8
         });
         let click = synth(0.03, |t, _| tone(t, 1250.0) * (-t * 220.0).exp() * 0.5);
         let chime = synth(0.9, |t, _| {
@@ -161,10 +203,17 @@ impl Sounds {
             (a + b) * 0.30
         });
         Some(Sounds {
-            clack: load_sound_from_bytes(&clack).await.ok()?,
+            clack: [
+                load_sound_from_bytes(&wav(&clack_samples(0), 1)).await.ok()?,
+                load_sound_from_bytes(&wav(&clack_samples(1), 1)).await.ok()?,
+                load_sound_from_bytes(&wav(&clack_samples(2), 1)).await.ok()?,
+            ],
             cushion: load_sound_from_bytes(&cushion).await.ok()?,
             pocket: load_sound_from_bytes(&pocket).await.ok()?,
-            cue: load_sound_from_bytes(&cue).await.ok()?,
+            cue: [
+                load_sound_from_bytes(&wav(&cue_samples(0), 1)).await.ok()?,
+                load_sound_from_bytes(&wav(&cue_samples(1), 1)).await.ok()?,
+            ],
             click: load_sound_from_bytes(&click).await.ok()?,
             chime: load_sound_from_bytes(&chime).await.ok()?,
             knock: load_sound_from_bytes(&knock).await.ok()?,
@@ -219,7 +268,8 @@ impl Sounds {
 
     /// `speed` is the closing speed of the two balls in m/s.
     pub fn ball_hit(&self, speed: f64) {
-        self.play(&self.clack, ((speed / 4.0).powf(0.7)) as f32);
+        let kind = if speed < 0.9 { 0 } else if speed < 3.2 { 1 } else { 2 };
+        self.play(&self.clack[kind], ((speed / 4.0).powf(0.7)) as f32);
     }
     pub fn cushion_hit(&self, speed: f64) {
         self.play(&self.cushion, ((speed / 4.0).powf(0.8)) as f32);
@@ -228,7 +278,7 @@ impl Sounds {
         self.play(&self.pocket, 0.9);
     }
     pub fn cue_strike(&self, speed: f64) {
-        self.play(&self.cue, (0.25 + speed / 9.0) as f32);
+        self.play(&self.cue[(speed > 4.5) as usize], (0.25 + speed / 9.0) as f32);
     }
     pub fn click(&self) {
         self.play(&self.click, 0.5);
@@ -244,5 +294,57 @@ impl Sounds {
     }
     pub fn chime(&self) {
         self.play(&self.chime, 0.8);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Seconds until 90% of the sound's energy has been heard.
+    fn length(s: &[f32]) -> f32 {
+        let total: f32 = s.iter().map(|x| x * x).sum();
+        let mut sum = 0.0;
+        for (i, x) in s.iter().enumerate() {
+            sum += x * x;
+            if sum >= total * 0.9 {
+                return i as f32 / RATE as f32;
+            }
+        }
+        0.0
+    }
+
+    /// How bright the first two milliseconds are: the energy of the
+    /// sample-to-sample change against the energy of the sound itself.
+    fn brightness(s: &[f32]) -> f32 {
+        let n = (RATE as f32 * 0.002) as usize;
+        let change: f32 = s[..n].windows(2).map(|w| (w[1] - w[0]).powi(2)).sum();
+        let energy: f32 = s[..n].iter().map(|x| x * x).sum();
+        change / energy
+    }
+
+    #[test]
+    fn ball_clicks_are_short_and_harder_hits_are_brighter() {
+        let hits: Vec<Vec<f32>> = (0..3).map(clack_samples).collect();
+        for h in &hits {
+            assert!(h.iter().all(|x| x.abs() <= 1.0), "clipped");
+            // A click, not a ring: nearly all of it inside a few milliseconds.
+            // (the hardest hit also shakes the table, which lingers a little).
+            assert!(length(h) < 0.015, "too long: {}", length(h));
+            println!("click: {:.4} s, brightness {:.3}", length(h), brightness(h));
+        }
+        assert!(brightness(&hits[0]) < brightness(&hits[1]));
+        assert!(brightness(&hits[1]) < brightness(&hits[2]));
+    }
+
+    #[test]
+    fn the_cue_tip_is_lower_and_rounder_than_a_ball_click() {
+        for k in 0..2 {
+            let c = cue_samples(k);
+            assert!(c.iter().all(|x| x.abs() <= 1.0), "clipped");
+            assert!(brightness(&c) < brightness(&clack_samples(0)));
+            println!("cue: {:.4} s, brightness {:.3}", length(&c), brightness(&c));
+            assert!(length(&c) > 0.002 && length(&c) < 0.02, "length {}", length(&c));
+        }
     }
 }

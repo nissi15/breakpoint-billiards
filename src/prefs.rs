@@ -15,6 +15,8 @@ pub struct Prefs {
     pub pocket_hints: bool,
     /// 8-ball: shots must be called.
     pub call_shots: bool,
+    /// After a foul the cue ball goes behind the line.
+    pub line_fouls: bool,
     pub sound: bool,
     /// 0 = off .. 3 = high.
     pub music: u8,
@@ -32,6 +34,7 @@ impl Default for Prefs {
             guide: 0,
             pocket_hints: true,
             call_shots: false,
+            line_fouls: false,
             sound: true,
             music: 2,
             fullscreen: true,
@@ -67,6 +70,7 @@ impl Prefs {
             guide: map.get("guide").and_then(|v| v.parse().ok()).filter(|g| *g <= 2).unwrap_or(d.guide),
             pocket_hints: b("pocket_hints", d.pocket_hints),
             call_shots: b("call_shots", d.call_shots),
+            line_fouls: b("line_fouls", d.line_fouls),
             sound: b("sound", d.sound),
             music: map.get("music").and_then(|v| v.parse().ok()).filter(|m| *m <= 3).unwrap_or(d.music),
             fullscreen: b("fullscreen", d.fullscreen),
@@ -75,8 +79,8 @@ impl Prefs {
 
     pub fn to_text(&self) -> String {
         format!(
-            "# Breakpoint Billiards settings\nmode={}\nopponent={}\nlevel={}\ntheme={}\nview={}\nguide={}\npocket_hints={}\ncall_shots={}\nsound={}\nmusic={}\nfullscreen={}\n",
-            self.mode, self.opponent, self.level, self.theme, self.view, self.guide, self.pocket_hints, self.call_shots, self.sound, self.music, self.fullscreen
+            "# Breakpoint Billiards settings\nmode={}\nopponent={}\nlevel={}\ntheme={}\nview={}\nguide={}\npocket_hints={}\ncall_shots={}\nline_fouls={}\nsound={}\nmusic={}\nfullscreen={}\n",
+            self.mode, self.opponent, self.level, self.theme, self.view, self.guide, self.pocket_hints, self.call_shots, self.line_fouls, self.sound, self.music, self.fullscreen
         )
     }
 
@@ -104,7 +108,7 @@ mod tests {
 
     #[test]
     fn settings_round_trip_and_survive_junk() {
-        let p = Prefs { theme: 7, guide: 2, call_shots: true, sound: false, music: 1, view: "orbit".into(), ..Prefs::default() };
+        let p = Prefs { theme: 7, guide: 2, call_shots: true, line_fouls: true, sound: false, music: 1, view: "orbit".into(), ..Prefs::default() };
         assert_eq!(Prefs::parse(&p.to_text()), p);
         let junk = Prefs::parse("theme=banana\nguide=9\nmusic=7\nnonsense\n=\n");
         assert_eq!(junk, Prefs::default());

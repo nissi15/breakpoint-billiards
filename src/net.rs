@@ -32,6 +32,8 @@ pub enum Msg {
         first: u8,
         /// 8-ball: shots must be called. The host's choice.
         calls: bool,
+        /// After a foul the cue ball goes behind the line. The host's choice.
+        line: bool,
     },
     /// Live cue position while the remote player aims.
     Cue {
@@ -89,7 +91,9 @@ fn pf(s: Option<&str>) -> Option<f64> {
 impl Msg {
     pub fn encode(&self) -> String {
         match self {
-            Msg::Start { mode, seed, first, calls } => format!("START {mode} {seed:x} {first} {}", *calls as u8),
+            Msg::Start { mode, seed, first, calls, line } => {
+                format!("START {mode} {seed:x} {first} {} {}", *calls as u8, *line as u8)
+            }
             Msg::Cue {
                 x,
                 y,
@@ -175,6 +179,7 @@ impl Msg {
                 first: it.next()?.parse().ok()?,
                 // Versions before 1.3 always played called shots.
                 calls: it.next().is_none_or(|v| v != "0"),
+                line: it.next() == Some("1"),
             }),
             "CUE" => Some(Msg::Cue {
                 x: pf(it.next())?,
@@ -1370,6 +1375,7 @@ mod tests {
                 seed: 0xDEADBEEF12345678,
                 first: 1,
                 calls: false,
+                line: true,
             },
             Msg::Cue {
                 x: -0.635,
@@ -1432,7 +1438,7 @@ mod tests {
         }
         assert_eq!(Msg::decode("garbage 1 2 3"), None);
         // Messages from versions before 1.3 still read: called shots, no guide.
-        assert_eq!(Msg::decode("START 0 ff 1"), Some(Msg::Start { mode: 0, seed: 255, first: 1, calls: true }));
+        assert_eq!(Msg::decode("START 0 ff 1"), Some(Msg::Start { mode: 0, seed: 255, first: 1, calls: true, line: false }));
         let old = Msg::Cue { x: 0.0, y: 0.0, aim: 1.0, power: 0.0, side: 0.0, top: 0.0, guide: None };
         assert_eq!(Msg::decode(&old.encode()), Some(old));
         assert_eq!(Msg::decode("SHOT 1 2"), None);

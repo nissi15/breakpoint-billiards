@@ -166,6 +166,9 @@ pub struct Rules {
     /// 8-ball: every shot must be called (ball and pocket). When off, any
     /// ball of your own that drops legally counts, and so does the 8.
     pub call_shots: bool,
+    /// Bar rule: after any foul the cue ball goes behind the head string
+    /// (the official rule is ball in hand anywhere on the table).
+    pub line_fouls: bool,
 }
 
 /// Innings without progress before the referee declares a stalemate (WPA 1.13).
@@ -189,15 +192,17 @@ impl Rules {
             rerack: None,
             quiet: 0,
             call_shots: true,
+            line_fouls: false,
         }
     }
 
     /// Start a fresh rack with `breaker` to break (after a re-rack decision).
     pub fn reset_rack(&mut self, breaker: usize) {
         let names = self.names.clone();
-        let call_shots = self.call_shots;
+        let (call_shots, line_fouls) = (self.call_shots, self.line_fouls);
         *self = Rules::new(self.mode, names, breaker);
         self.call_shots = call_shots;
+        self.line_fouls = line_fouls;
     }
 
     pub fn remaining(world: &World, group: Group) -> usize {
@@ -297,7 +302,7 @@ impl Rules {
             Some("No ball hit")
         } else if !ctx.legal.contains(&log.first_hit.unwrap()) {
             Some("Wrong ball first")
-        } else if eight_ball
+        } else if (eight_ball || self.line_fouls)
             && ctx.kitchen
             && !ctx.break_shot
             && log.first_hit_in_kitchen
@@ -490,7 +495,8 @@ impl Rules {
     /// WPA 1.6: with ball in hand behind the head string and every legal
     /// ball also behind it, the nearest legal ball is spotted.
     fn kitchen_relief(&mut self, world: &mut World) {
-        if !(self.kitchen && self.ball_in_hand) || self.break_shot || self.mode != Mode::EightBall {
+        let applies = self.mode == Mode::EightBall || (self.line_fouls && self.mode == Mode::NineBall);
+        if !(self.kitchen && self.ball_in_hand) || self.break_shot || !applies {
             return;
         }
         let legal = self.context(world).legal;
@@ -534,7 +540,7 @@ impl Rules {
         self.break_shot = false;
         self.current = out.next_player;
         self.ball_in_hand = out.ball_in_hand;
-        self.kitchen = out.kitchen;
+        self.kitchen = out.kitchen || (self.line_fouls && out.foul.is_some() && out.ball_in_hand);
         self.winner = out.winner;
         self.pending = out.decision.clone();
         if self.winner.is_none()
@@ -779,6 +785,33 @@ mod tests {
         // The setting survives a new rack.
         r.reset_rack(1);
         assert!(!r.call_shots);
+    }
+
+    #[test]
+    fn with_the_bar_rule_every_foul_puts_the_cue_ball_behind_the_line() {
+        for (mut r, mut w) in [eight_ball(), nine_ball()] {
+            r.break_shot = false;
+            r.ball_in_hand = false;
+            r.kitchen = false;
+            let ctx = r.context(&w);
+            // Official rule: a scratch gives ball in hand anywhere.
+            let out = r.judge(&ctx, &NONE, &log(None, &[], true), &w);
+            let mut official = r.clone();
+            official.apply(&mut w.clone(), &out);
+            assert!(official.ball_in_hand && !official.kitchen);
+            // Bar rule: behind the line, and it survives a new rack.
+            r.line_fouls = true;
+            r.apply(&mut w, &out);
+            assert!(r.ball_in_hand && r.kitchen && r.context(&w).kitchen);
+            // Shooting back at a ball behind the line is then a foul.
+            let ctx = r.context(&w);
+            let mut l = log(Some(ctx.legal[0]), &[], false);
+            l.first_hit_in_kitchen = true;
+            l.crossed_head_string = false;
+            assert!(r.judge(&ctx, &NONE, &l, &w).foul.is_some());
+            r.reset_rack(0);
+            assert!(r.line_fouls);
+        }
     }
 
     #[test]
