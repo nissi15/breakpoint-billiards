@@ -550,6 +550,10 @@ impl Rules {
         {
             self.rerack = Some(self.breaker);
         }
+        // Behind the line means the cue ball starts there, wherever it stopped.
+        if self.kitchen && self.ball_in_hand && world.cue().pos.x > HEAD_SPOT.x {
+            world.place_ball(0, HEAD_SPOT);
+        }
         self.kitchen_relief(world);
     }
 
@@ -795,7 +799,9 @@ mod tests {
             r.kitchen = false;
             let ctx = r.context(&w);
             // Official rule: a scratch gives ball in hand anywhere.
-            let out = r.judge(&ctx, &NONE, &log(None, &[], true), &w);
+            w.balls[0].pos = v2(0.0, 0.3);
+            let out = r.judge(&ctx, &NONE, &log(None, &[], false), &w);
+            assert!(out.foul.is_some());
             let mut official = r.clone();
             official.apply(&mut w.clone(), &out);
             assert!(official.ball_in_hand && !official.kitchen);
@@ -803,6 +809,7 @@ mod tests {
             r.line_fouls = true;
             r.apply(&mut w, &out);
             assert!(r.ball_in_hand && r.kitchen && r.context(&w).kitchen);
+            assert!(w.cue().pos.x <= HEAD_SPOT.x + 1e-9, "the cue ball should be moved behind the line");
             // Shooting back at a ball behind the line is then a foul.
             let ctx = r.context(&w);
             let mut l = log(Some(ctx.legal[0]), &[], false);
