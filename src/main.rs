@@ -106,6 +106,8 @@ struct Settings {
     fullscreen: bool,
     guide: u8,
     pocket_hints: bool,
+    /// 8-ball: shots must be called. Online, the host's choice is used.
+    call_shots: bool,
     /// Testing aid: the computer plays the local player's turns too.
     autoplay: bool,
     log: Option<String>,
@@ -320,6 +322,8 @@ struct Game {
     /// Where the remote player's cue is heading: aim and power. The local
     /// copy glides there so updates arriving a few times a second look smooth.
     remote_cue: Option<(f64, f32)>,
+    /// The aim guide the remote player is using, when their game says.
+    remote_guide: Option<u8>,
     shooter_local: bool,
     cue_sent: f64,
     /// Online shot clock: seconds left for the player at the table.
@@ -410,7 +414,8 @@ impl Game {
         } else {
             breaker
         };
-        let rules = Rules::new(settings.mode, names, first);
+        let mut rules = Rules::new(settings.mode, names, first);
+        rules.call_shots = settings.call_shots;
         let ctx = rules.context(&world);
         let mut g = Game {
             world,
@@ -430,6 +435,7 @@ impl Game {
             restart: None,
             inbox: std::collections::VecDeque::new(),
             remote_cue: None,
+            remote_guide: None,
             shooter_local: true,
             cue_sent: 0.0,
             clock: BREAK_CLOCK,
@@ -775,7 +781,7 @@ impl Game {
     fn update_call(&mut self) {
         let eight_ball = self.rules.mode == Mode::EightBall && !self.rules.break_shot;
         let mut call = ShotCall {
-            safety: self.call.safety && eight_ball,
+            safety: self.call.safety && eight_ball && self.rules.call_shots,
             push_out: self.call.push_out && self.ctx.can_push,
             ..ShotCall::default()
         };
@@ -809,7 +815,7 @@ impl Game {
         if self.call.push_out {
             return "Push out called  (P to cancel)".into();
         }
-        if self.rules.mode != Mode::EightBall || self.rules.break_shot {
+        if self.rules.mode != Mode::EightBall || self.rules.break_shot || !self.rules.call_shots {
             return if self.ctx.can_push {
                 "P: call a push out".into()
             } else {
@@ -969,8 +975,10 @@ impl Game {
                     power,
                     side,
                     top,
+                    guide,
                 } => {
                     if ready {
+                        self.remote_guide = guide;
                         let p = physics::v2(x, y);
                         if World::in_bounds(p) && self.world.spot_free(p, 0) {
                             self.world.balls[0].pos = p;
@@ -1224,7 +1232,9 @@ impl Game {
                     {
                         self.spin = Vec2::ZERO;
                     }
-                    let calling = self.rules.mode == Mode::EightBall && !self.rules.break_shot;
+                    let calling = self.rules.mode == Mode::EightBall
+                        && !self.rules.break_shot
+                        && self.rules.call_shots;
                     if is_key_pressed(KeyCode::S) && calling {
                         self.call.safety = !self.call.safety;
                     }
@@ -1488,6 +1498,7 @@ impl Game {
                 power: self.power as f64,
                 side: self.spin.x as f64,
                 top: self.spin.y as f64,
+                guide: Some(self.guide),
             };
             self.send(msg);
         }
@@ -1609,15 +1620,24 @@ impl Game {
         draw_line(p.x, p.y, q.x, q.y, w, c);
     }
 
+    /// The aim guide to draw: while the other player aims, theirs.
+    fn shown_guide(&self) -> u8 {
+        match (&self.phase, self.remote_guide) {
+            (Phase::RemoteAim, Some(g)) => g.min(2),
+            _ => self.guide,
+        }
+    }
+
     fn draw_guides(&self) {
         let cue = self.world.cue().pos;
         let d = V2::from_angle(self.aim);
         let hit = cast_cue(&self.world, cue, d);
         let white = Color::new(1.0, 1.0, 1.0, 0.62);
-        if self.guide == 2 {
+        let guide = self.shown_guide();
+        if guide == 2 {
             return;
         }
-        if self.guide == 1 {
+        if guide == 1 {
             // Short guide: a stub of the aiming line and nothing else.
             self.line(cue + d * R, cue + d * (R + hit.dist.min(0.35)), 1.6, white);
             return;
@@ -1829,7 +1849,7 @@ impl Game {
         ) || matches!(self.phase, Phase::AiMove { t, .. } if t > 0.4);
         if guides {
             self.draw_guides();
-            if self.guide != 2 {
+            if self.shown_guide() != 2 {
                 if self.pocket_hints {
                     if let Some(p) = self.call.pocket {
                         self.ring(self.world.pockets[p].center, 0.075, 2.5, GOLD);
@@ -2268,6 +2288,7 @@ fn settings_from(p: &prefs::Prefs, settings: &mut Settings) {
     };
     settings.guide = p.guide.min(2);
     settings.pocket_hints = p.pocket_hints;
+    settings.call_shots = p.call_shots;
     settings.fullscreen = p.fullscreen;
 }
 
@@ -2303,6 +2324,7 @@ fn prefs_from(settings: &Settings, theme: usize, sfx: &Sfx) -> prefs::Prefs {
         .into(),
         guide: settings.guide,
         pocket_hints: settings.pocket_hints,
+        call_shots: settings.call_shots,
         sound,
         music,
         fullscreen: settings.fullscreen,
@@ -2349,6 +2371,7 @@ async fn main() {
             _ => 0,
         },
         pocket_hints: !has_arg("--no-pocket-hints"),
+        call_shots: has_arg("--call-shots"),
         autoplay: has_arg("--autoplay"),
         log: arg_value("--log"),
     };
@@ -2467,7 +2490,7 @@ async fn main() {
         clear_background(BLACK);
 
         // Online lobby: turn a finished connection into a game.
-        let mut start: Option<(Peer, usize, u64, usize)> = None;
+        let mut start: Option<(Peer, usize, u64, usize, bool)> = None;
         lobby = match std::mem::replace(&mut lobby, Lobby::Idle) {
             Lobby::Creating(rx) => match rx.try_recv() {
                 Ok(Ok(room)) => {
@@ -2487,8 +2510,9 @@ async fn main() {
                         mode: mode_code(settings.mode),
                         seed,
                         first: 0,
+                        calls: settings.call_shots,
                     });
-                    start = Some((peer, 0, seed, 0));
+                    start = Some((peer, 0, seed, 0, settings.call_shots));
                     Lobby::Idle
                 }
                 None => Lobby::Hosting(room),
@@ -2502,18 +2526,18 @@ async fn main() {
             Lobby::Joined(mut peer) => {
                 let mut begun = None;
                 for m in peer.poll() {
-                    if let Msg::Start { mode, seed, first } = m {
-                        begun = Some((mode, seed, first));
+                    if let Msg::Start { mode, seed, first, calls } = m {
+                        begun = Some((mode, seed, first, calls));
                     }
                 }
                 match begun {
-                    Some((mode, seed, first)) => {
+                    Some((mode, seed, first, calls)) => {
                         settings.mode = if mode == 1 {
                             Mode::NineBall
                         } else {
                             Mode::EightBall
                         };
-                        start = Some((peer, 1, seed, (first as usize).min(1)));
+                        start = Some((peer, 1, seed, (first as usize).min(1), calls));
                         Lobby::Idle
                     }
                     None if !peer.alive => Lobby::Failed("The host closed the connection".into()),
@@ -2522,11 +2546,17 @@ async fn main() {
             }
             other => other,
         };
-        if let Some((peer, local, seed, first)) = start {
+        if let Some((peer, local, seed, first, calls)) = start {
             settings.opponent = Opponent::Online;
             wins = [0, 0];
             breaker = first;
-            game = Some(Game::new(&settings, first, seed, Some(peer), local));
+            let mut g = Game::new(&settings, first, seed, Some(peer), local);
+            // Both players use the host's rule.
+            g.rules.call_shots = calls;
+            if settings.mode == Mode::EightBall {
+                g.say(if calls { "Call the pocket: on" } else { "Any pocket counts (call the pocket: off)" });
+            }
+            game = Some(g);
         }
 
         let mut quit = false;
@@ -2547,7 +2577,9 @@ async fn main() {
                 if online && g.local == 1 {
                     breaker = first;
                     let peer = g.net.take();
-                    next = Some(Game::new(&settings, first, seed, peer, 1));
+                    let mut n = Game::new(&settings, first, seed, peer, 1);
+                    n.rules.call_shots = g.rules.call_shots;
+                    next = Some(n);
                 }
             }
             g.draw(&mut r, &lay, wins);
@@ -2570,10 +2602,13 @@ async fn main() {
                             mode: mode_code(settings.mode),
                             seed,
                             first: breaker as u8,
+                            calls: g.rules.call_shots,
                         });
                     }
                     let local = g.local;
-                    next = Some(Game::new(&settings, breaker, seed, peer, local));
+                    let mut n = Game::new(&settings, breaker, seed, peer, local);
+                    n.rules.call_shots = g.rules.call_shots;
+                    next = Some(n);
                 }
                 Action::Menu => to_menu = true,
                 Action::Quit => quit = true,

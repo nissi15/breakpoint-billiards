@@ -65,7 +65,7 @@ dependencies = [
 
 [[package]]
 name = "breakpoint-billiards"
-version = "1.2.0"
+version = "1.3.0"
 dependencies = [
  "chacha20poly1305",
  "macroquad",

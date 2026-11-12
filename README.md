@@ -32,7 +32,7 @@ Balls slide, roll and spin like the real thing. Follow, draw, side spin, throw a
 <td width="33%" valign="top">
 
 ### 📜 Official rules, refereed
-**8-Ball** and **9-Ball** follow the **WPA Rules of Play**: called shots, safeties, ball in hand, illegal breaks, push-outs, three-foul losses and stalemates. You just play.
+**8-Ball** and **9-Ball** follow the **WPA Rules of Play**: optional called shots, safeties, ball in hand, illegal breaks, push-outs, three-foul losses and stalemates. You just play.
 
 </td>
 <td width="33%" valign="top">
@@ -126,6 +126,7 @@ cd breakpoint-billiards
 - **Anywhere else?** You meet through a free public relay, then the two games try to connect directly to each other. When that works the HUD shows `ONLINE (DIRECT)` and the delay drops to almost nothing; if a router blocks it, play continues through the relay.
 - **Private.** Everything sent over the internet is encrypted with a key made from your room code, so only the two of you can read it or take part.
 - **Chat.** Press **Enter** to send your opponent a message. Chat is encrypted like everything else.
+- **Same rules, same view.** The host's *Call the pocket* choice applies to both players, and while your opponent aims you see the aim guide they are using.
 - **Shot clock.** You have 30 seconds a shot, as on the professional tour, with 60 for the break and the shot after it. Each player can press **E** once a rack for 30 more. Running out is a foul: your opponent gets ball in hand.
 - **Reliable.** Every shot is confirmed by the other player and re-sent if it gets lost, and after each shot the final ball positions are shared, so the two tables can never drift apart.
 
@@ -140,7 +141,7 @@ cd breakpoint-billiards
 | Look around | **Right-drag** to orbit, **wheel** to zoom, **middle-drag** to move |
 | Camera angles | **1–8** presets, **V** next camera, **Space** side or centred cue view |
 | Aim guide | **G** full / short / off, **H** pocket hints |
-| Call a shot (8-Ball) | Click a pocket, right-click a ball; **S** calls safety |
+| Call a shot (8-Ball, with *Call the pocket* on) | Click a pocket, right-click a ball; **S** calls safety |
 | Push out (9-Ball) | **P** on the shot after the break |
 | Place the cue ball | Drag it when you have ball in hand |
 | Chat (online) | **Enter** to type, **Enter** to send, **Esc** to close |
@@ -150,7 +151,7 @@ cd breakpoint-billiards
 <details>
 <summary><b>Rules in brief</b></summary>
 
-**8-Ball.** Pocket all of your group (solids 1–7 or stripes 9–15), then the 8. Every shot after the break must be called: obvious shots are called for you, otherwise click the pocket. Pocketing the 8 early, in an uncalled pocket, or on a foul loses the rack. An illegal break, or the 8 down on the break, gives the right player a choice of how to continue.
+**8-Ball.** Pocket all of your group (solids 1–7 or stripes 9–15), then the 8. Any of your balls that drops without a foul keeps you at the table, and the 8 wins in any pocket once your group is gone. Pocketing the 8 early or on a foul loses the rack. Turn on **Call the pocket** in the menu for the strict tournament rule: every shot after the break must then be called (obvious shots are called for you, otherwise click the pocket), and the 8 in an uncalled pocket loses. An illegal break, or the 8 down on the break, gives the right player a choice of how to continue.
 
 **9-Ball.** Always hit the lowest-numbered ball first. Any legally pocketed ball keeps you at the table, and the legal 9 wins. Straight after the break you may play a *push out*. Three fouls in a row lose the rack.
 

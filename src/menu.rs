@@ -257,7 +257,7 @@ pub fn menu(
 
     let total_w = 1110.0 * ui;
     let x0 = ((lay.sw - total_w) * 0.5).max(0.0);
-    let ch = 640.0 * ui;
+    let ch = 678.0 * ui;
     let y0 = ((lay.sh - ch) * 0.5).max(0.0);
 
     // ---------------- Hero column ----------------
@@ -468,6 +468,10 @@ pub fn menu(
     if toggle(r, sfx, bx, sy, col_w, "Pocket hints", "Show the pocket each ball is headed for", settings.pocket_hints, ui) {
         settings.pocket_hints = !settings.pocket_hints;
     }
+    if toggle(r, sfx, bx, sy + step, col_w, "Call the pocket", "8-Ball: a ball only counts in the pocket you called", settings.call_shots, ui) {
+        settings.call_shots = !settings.call_shots;
+    }
+    let sy = sy + step;
     let sound_on = sfx.0.as_ref().is_some_and(|s| s.enabled);
     let sound_sub = if sfx.0.is_none() { "No audio device found" } else { "Clacks, cushions and pockets" };
     if toggle(r, sfx, bx, sy + step, col_w, "Sound effects", sound_sub, sound_on, ui) {

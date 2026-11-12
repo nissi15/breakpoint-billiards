@@ -163,6 +163,9 @@ pub struct Rules {
     pub rerack: Option<usize>,
     /// Innings in a row with no ball pocketed and no foul (stalemate watch).
     pub quiet: u32,
+    /// 8-ball: every shot must be called (ball and pocket). When off, any
+    /// ball of your own that drops legally counts, and so does the 8.
+    pub call_shots: bool,
 }
 
 /// Innings without progress before the referee declares a stalemate (WPA 1.13).
@@ -185,13 +188,16 @@ impl Rules {
             pending: None,
             rerack: None,
             quiet: 0,
+            call_shots: true,
         }
     }
 
     /// Start a fresh rack with `breaker` to break (after a re-rack decision).
     pub fn reset_rack(&mut self, breaker: usize) {
         let names = self.names.clone();
+        let call_shots = self.call_shots;
         *self = Rules::new(self.mode, names, breaker);
+        self.call_shots = call_shots;
     }
 
     pub fn remaining(world: &World, group: Group) -> usize {
@@ -376,7 +382,8 @@ impl Rules {
                     .map(|i| log.pockets.get(i).copied())
             };
             if eight {
-                let called = !call.safety
+                let called = !self.call_shots
+                    || !call.safety
                     && call.ball == Some(8)
                     && call.pocket.is_some()
                     && pocket_of(8) == Some(call.pocket);
@@ -403,17 +410,23 @@ impl Rules {
             }
             // A called ball counts only if it is the shooter's and drops where called.
             let mine = self.groups[me];
-            let called_ok = match (call.safety, call.ball, call.pocket) {
-                (false, Some(b), Some(p)) => {
-                    b != 8
-                        && pocket_of(b) == Some(Some(p))
-                        && (mine.is_none() || group_of(b) == mine)
+            // The ball that keeps the shooter at the table: the called one,
+            // or without called shots the first of their own to drop.
+            let made = if call.safety {
+                None
+            } else if self.call_shots {
+                match (call.ball, call.pocket) {
+                    (Some(b), Some(p)) if pocket_of(b) == Some(Some(p)) => Some(b),
+                    _ => None,
                 }
-                _ => false,
-            };
+            } else {
+                log.potted.iter().copied().find(|&b| mine.is_none() || group_of(b) == mine)
+            }
+            .filter(|&b| b != 8 && (mine.is_none() || group_of(b) == mine));
+            let called_ok = made.is_some();
             if called_ok {
                 if mine.is_none() {
-                    let g = group_of(call.ball.unwrap()).unwrap();
+                    let g = group_of(made.unwrap()).unwrap();
                     out.assign = Some(g);
                     out.message = format!("{} takes {}", name(me), g.name());
                 } else if Self::remaining(world, mine.unwrap()) == 0 {
@@ -425,7 +438,7 @@ impl Rules {
                 out.next_player = opp;
                 out.message = if call.safety {
                     format!("Safety - {} to shoot", name(opp))
-                } else if !log.potted.is_empty() {
+                } else if !log.potted.is_empty() && self.call_shots {
                     format!("Not the called shot - {} to shoot", name(opp))
                 } else {
                     format!("{} to shoot", name(opp))
@@ -738,6 +751,34 @@ mod tests {
         assert_eq!((out.assign, out.next_player), (Some(Group::Stripes), 0));
         r.apply(&mut w, &out);
         assert_eq!(r.groups, [Some(Group::Stripes), Some(Group::Solids)]);
+    }
+
+    #[test]
+    fn without_called_shots_any_pocket_counts() {
+        let (mut r, mut w) = eight_ball();
+        r.call_shots = false;
+        r.break_shot = false;
+        r.ball_in_hand = false;
+        let ctx = r.context(&w);
+        // Nothing called at all, the 11 drops: the shooter takes stripes.
+        let out = r.judge(&ctx, &NONE, &log(Some(11), &[11], false), &w);
+        assert_eq!((out.next_player, out.assign), (0, Some(Group::Stripes)));
+        // With a group, only your own ball keeps you at the table.
+        r.groups = [Some(Group::Stripes), Some(Group::Solids)];
+        let ctx = r.context(&w);
+        assert_eq!(r.judge(&ctx, &NONE, &log(Some(11), &[3], false), &w).next_player, 1);
+        assert_eq!(r.judge(&ctx, &NONE, &log(Some(11), &[3, 12], false), &w).next_player, 0);
+        // A foul still ends the turn.
+        assert_eq!(r.judge(&ctx, &NONE, &log(Some(11), &[12], true), &w).next_player, 1);
+        // The 8 wins in any pocket once the group is cleared, and loses early.
+        assert_eq!(r.judge(&ctx, &NONE, &log(Some(11), &[8], false), &w).winner, Some(1));
+        pot(&mut w, &[9, 10, 11, 12, 13, 14, 15]);
+        let ctx = r.context(&w);
+        assert!(ctx.on_eight);
+        assert_eq!(r.judge(&ctx, &NONE, &log(Some(8), &[8], false), &w).winner, Some(0));
+        // The setting survives a new rack.
+        r.reset_rack(1);
+        assert!(!r.call_shots);
     }
 
     #[test]
