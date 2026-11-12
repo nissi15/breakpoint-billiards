@@ -22,11 +22,20 @@ pub struct MenuState {
     /// The code being typed into the join boxes.
     pub code: String,
     copied_at: f64,
+    settings_tab: usize,
 }
 
 impl MenuState {
     pub fn new() -> MenuState {
-        MenuState { code: String::new(), copied_at: -100.0 }
+        MenuState {
+            code: String::new(), copied_at: -100.0,
+            // Screenshot-only view selection; never persisted in preferences.
+            settings_tab: match std::env::var("BPB_MENU_TAB").as_deref() {
+                Ok("view") => 1,
+                Ok("audio") => 2,
+                _ => 0,
+            },
+        }
     }
 }
 
@@ -448,48 +457,62 @@ pub fn menu(
         r.theme = (r.theme + 1) % n;
     }
 
+    // Secondary preferences stay local to the menu; the lobby remains visible.
+    if let Some(tab) = segmented(r, sfx,
+        Rect::new(bx, y0 + 280.0 * ui, col_w, 38.0 * ui),
+        &["RULES", "VIEW", "AUDIO"], state.settings_tab, ui) {
+        state.settings_tab = tab;
+    }
+    let sy = y0 + 366.0 * ui;
+    let step = 64.0 * ui;
+    match state.settings_tab {
+        0 => {
+            label(r, "HOUSE RULES", bx, y0 + 352.0 * ui, ui);
+    if toggle(r, sfx, bx, sy, col_w, "Call the pocket", "8-Ball: a ball only counts in the pocket you called", settings.call_shots, ui) {
+        settings.call_shots = !settings.call_shots;
+    }
+    if toggle(r, sfx, bx, sy + step, col_w, "Behind the line", "After a foul, the white ball starts behind the line", settings.line_fouls, ui) {
+        settings.line_fouls = !settings.line_fouls;
+    }
+            r.text("Optional variations for your next match.", bx, y0 + 510.0 * ui, 12.0 * ui, MUTED, false);
+        }
+        1 => {
     // CAMERA
-    label(r, "CAMERA", bx, y0 + 280.0 * ui, ui);
+    label(r, "CAMERA", bx, y0 + 352.0 * ui, ui);
     let views = [ViewMode::Cue, ViewMode::Free, ViewMode::Top];
     let vi = views.iter().position(|v| *v == settings.view).unwrap_or(0);
-    if let Some(k) = segmented(r, sfx, Rect::new(bx, y0 + 294.0 * ui, col_w, 36.0 * ui), &["SHOOTER", "ORBIT", "TOP"], vi, ui) {
+    if let Some(k) = segmented(r, sfx, Rect::new(bx, y0 + 366.0 * ui, col_w, 36.0 * ui), &["SHOOTER", "ORBIT", "TOP"], vi, ui) {
         settings.view = views[k];
     }
 
     // AIM ASSIST
-    label(r, "AIM GUIDE", bx, y0 + 352.0 * ui, ui);
-    if let Some(k) = segmented(r, sfx, Rect::new(bx, y0 + 366.0 * ui, col_w, 36.0 * ui), &["FULL", "SHORT", "OFF"], settings.guide as usize, ui) {
+    label(r, "AIM GUIDE", bx, y0 + 436.0 * ui, ui);
+    if let Some(k) = segmented(r, sfx, Rect::new(bx, y0 + 450.0 * ui, col_w, 36.0 * ui), &["FULL", "SHORT", "OFF"], settings.guide as usize, ui) {
         settings.guide = k as u8;
     }
 
-    // Switches
-    let sy = y0 + 416.0 * ui;
-    let step = 33.5 * ui;
+    let sy = y0 + 518.0 * ui;
     if toggle(r, sfx, bx, sy, col_w, "Pocket hints", "Show the pocket each ball is headed for", settings.pocket_hints, ui) {
         settings.pocket_hints = !settings.pocket_hints;
     }
-    if toggle(r, sfx, bx, sy + step, col_w, "Call the pocket", "8-Ball: a ball only counts in the pocket you called", settings.call_shots, ui) {
-        settings.call_shots = !settings.call_shots;
-    }
-    if toggle(r, sfx, bx, sy + 2.0 * step, col_w, "Behind the line", "After a foul, the white ball starts behind the line", settings.line_fouls, ui) {
-        settings.line_fouls = !settings.line_fouls;
-    }
-    let sy = sy + 2.0 * step;
+        }
+        _ => {
+            label(r, "AUDIO & DISPLAY", bx, y0 + 352.0 * ui, ui);
     let sound_on = sfx.0.as_ref().is_some_and(|s| s.enabled);
     let sound_sub = if sfx.0.is_none() { "No audio device found" } else { "Clacks, cushions and pockets" };
-    if toggle(r, sfx, bx, sy + step, col_w, "Sound effects", sound_sub, sound_on, ui) {
+    if toggle(r, sfx, bx, sy, col_w, "Sound effects", sound_sub, sound_on, ui) {
         if let Some(s) = sfx.0.as_mut() {
             s.enabled = !s.enabled;
         }
     }
     // Music: a name on the left, a four-step level control on the right.
-    let my = sy + 2.0 * step;
+    let my = sy + step;
     let hover = Rect::new(bx, my, col_w, 30.0 * ui).contains(mouse());
     r.text("Music", bx, my + 9.0 * ui, 13.5 * ui, if hover { PALE } else { Color::new(0.85, 0.87, 0.9, 1.0) }, true);
     r.text("Late-night lounge jazz", bx, my + 25.0 * ui, 11.0 * ui, MUTED, false);
     let level = sfx.0.as_ref().map_or(0, |s| s.music_level as usize);
-    let seg_w = 176.0 * ui;
-    let seg = Rect::new(bx + col_w - seg_w, my + 2.0 * ui, seg_w, 26.0 * ui);
+    let seg_w = col_w;
+    let seg = Rect::new(bx, my + 38.0 * ui, seg_w, 26.0 * ui);
     if let Some(k) = segmented(r, sfx, seg, &["OFF", "LOW", "MID", "HIGH"], level, ui) {
         if let Some(s) = sfx.0.as_mut() {
             s.music_level = k as u8;
@@ -498,6 +521,9 @@ pub fn menu(
     if toggle(r, sfx, bx, sy + 3.0 * step, col_w, "Fullscreen", "Also F11 at any time", settings.fullscreen, ui) {
         settings.fullscreen = !settings.fullscreen;
         set_fullscreen(settings.fullscreen);
+    }
+
+        }
     }
 
     // Footer
